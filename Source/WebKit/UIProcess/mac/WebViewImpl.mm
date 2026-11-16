@@ -1350,6 +1350,18 @@ WebViewImpl::WebViewImpl(WKWebView *view, WebProcessPool& processPool, Ref<API::
         if (CheckedPtr checkedThis = weakThis)
             checkedThis->contentRelativeViewsHysteresisTimerFired(state);
     }, viewStateHysteresis))
+    , m_animatedFrameResizeHysteresis(makeUniqueRef<PAL::HysteresisActivity>([weakThis = WeakPtr { *this }](PAL::HysteresisState state) {
+        CheckedPtr checkedThis = weakThis.get();
+        if (!checkedThis || [checkedThis->m_view.get() inLiveResize])
+            return;
+        if (state == PAL::HysteresisState::Started) {
+            checkedThis->m_page->viewWillStartLiveResize();
+            [checkedThis->m_layoutStrategy willStartLiveResize];
+        } else {
+            checkedThis->m_page->viewWillEndLiveResize();
+            [checkedThis->m_layoutStrategy didEndLiveResize];
+        }
+    }, 150_ms))
     , m_mouseTrackingObserver(adoptNS([[WKMouseTrackingObserver alloc] initWithViewImpl:*this]))
     , m_primaryTrackingArea(adoptNS([[NSTrackingArea alloc] initWithRect:view.frame options:trackingAreaOptions() owner:m_mouseTrackingObserver.get() userInfo:nil]))
     , m_flagsChangedEventMonitorTrackingArea(adoptNS([[NSTrackingArea alloc] initWithRect:view.frame options:flagsChangedEventMonitorTrackingAreaOptions() owner:m_mouseTrackingObserver.get() userInfo:nil]))
@@ -1942,6 +1954,13 @@ void WebViewImpl::renewGState()
 
 void WebViewImpl::setFrameSize(CGSize)
 {
+    if (![m_view.get() inLiveResize]) {
+        auto now = MonotonicTime::now();
+        if (m_animatedFrameResizeHysteresis->state() == PAL::HysteresisState::Started || now - m_lastFrameSizeChangeTime < 100_ms)
+            m_animatedFrameResizeHysteresis->impulse();
+        m_lastFrameSizeChangeTime = now;
+    }
+
     [m_layoutStrategy didChangeFrameSize];
     [m_warningView setFrame:[m_view.get() bounds]];
 

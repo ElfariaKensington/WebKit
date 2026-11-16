@@ -556,6 +556,14 @@ void WebPageProxy::scheduleSetObscuredContentInsetsDispatch()
 
     m_didScheduleSetObscuredContentInsetsDispatch = true;
 
+    constexpr auto obscuredContentInsetsCoalesceInterval = 45_ms;
+    auto elapsed = MonotonicTime::now() - m_internals->lastObscuredContentInsetsDispatchTime;
+    if (m_internals->pendingObscuredContentInsets && elapsed < obscuredContentInsetsCoalesceInterval) {
+        // Coalesce rapid animated inset changes (e.g. sidebar open/close) so WebContent doesn't synchronously relayout every frame.
+        m_internals->obscuredContentInsetsCoalesceTimer.startOneShot(obscuredContentInsetsCoalesceInterval - elapsed);
+        return;
+    }
+
     callOnMainRunLoop([weakThis = WeakPtr { *this }] {
         if (RefPtr protectedThis = weakThis.get())
             protectedThis->dispatchSetObscuredContentInsets();
@@ -564,6 +572,7 @@ void WebPageProxy::scheduleSetObscuredContentInsetsDispatch()
 
 void WebPageProxy::dispatchSetObscuredContentInsets()
 {
+    m_internals->obscuredContentInsetsCoalesceTimer.stop();
     bool wasScheduled = std::exchange(m_didScheduleSetObscuredContentInsetsDispatch, false);
     if (!wasScheduled)
         return;

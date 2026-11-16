@@ -86,8 +86,8 @@ NODELETE uint64_t SettingsBase::defaultMaximumSourceBufferSize()
     return 110376422;
 #endif
     // For other platforms, allow SourceBuffers to store up to 304MB each, enough for approximately five minutes
-    // of 1080p video and stereo audio.
-    return 318767104;
+    // of 1080p video and stereo audio. Cap at 160 MB to prevent multi-hundred-MB MSE bloat.
+    return 167772160;
 }
 
 #endif

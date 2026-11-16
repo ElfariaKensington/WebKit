@@ -189,8 +189,14 @@ Ref<SharedBuffer> FragmentedSharedBuffer::getContiguousData(size_t position, siz
     auto& element = elements[0];
     size_t offsetInSegment = position - element.beginPosition;
     ASSERT(element.segment->size() > offsetInSegment);
-    if (element.segment->size() - offsetInSegment >= length)
-        return SharedBufferDataView { element.segment.copyRef(), offsetInSegment, length }.createSharedBuffer();
+    if (element.segment->size() - offsetInSegment >= length) {
+        // Avoid retaining a large DataSegment (e.g. a multi-megabyte MSE appendBuffer chunk)
+        // when only a small slice (e.g. a single media sample) is requested.
+        constexpr size_t maxZeroCopySegmentSize = 65536;
+        if (element.segment->size() <= maxZeroCopySegmentSize || length >= element.segment->size() - element.segment->size() / 4)
+            return SharedBufferDataView { element.segment.copyRef(), offsetInSegment, length }.createSharedBuffer();
+        return SharedBuffer::create(element.segment->span().subspan(offsetInSegment, length));
+    }
     Vector<uint8_t> combinedData(ReserveCapacityTag { }, length);
     combinedData.append(element.segment->span().subspan(offsetInSegment));
 

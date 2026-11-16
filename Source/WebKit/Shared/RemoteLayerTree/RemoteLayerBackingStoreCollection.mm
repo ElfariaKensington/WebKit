@@ -34,6 +34,7 @@
 #import "RemoteLayerBackingStore.h"
 #import "RemoteLayerTreeContext.h"
 #import "RemoteRenderingBackendProxy.h"
+#import "WebPageInlines.h"
 #import <WebCore/IOSurfacePool.h>
 #import <WebCore/ImageBuffer.h>
 #import <wtf/TZoneMallocInlines.h>
@@ -283,7 +284,15 @@ void RemoteLayerBackingStoreCollection::tryMarkAllBackingStoreVolatile(Completio
 void RemoteLayerBackingStoreCollection::markAllBackingStoreVolatileFromTimer()
 {
     Vector<std::pair<Ref<RemoteImageBufferSetProxy>, OptionSet<BufferInSetType>>> identifiers;
-    bool collectedAllRemoteRenderingBuffers = collectAllRemoteRenderingBufferIdentifiersToMarkVolatile(VolatilityMarkingBehavior::ConsiderTimeSinceLastDisplay, { }, identifiers);
+    OptionSet<VolatilityMarkingBehavior> liveBehavior { VolatilityMarkingBehavior::ConsiderTimeSinceLastDisplay };
+    OptionSet<VolatilityMarkingBehavior> unparentedBehavior;
+#if PLATFORM(MAC)
+    if (!protect(layerTreeContext())->webPage().isVisible()) {
+        liveBehavior.add(VolatilityMarkingBehavior::IgnoreReachability);
+        unparentedBehavior.add(VolatilityMarkingBehavior::IgnoreReachability);
+    }
+#endif
+    bool collectedAllRemoteRenderingBuffers = collectAllRemoteRenderingBufferIdentifiersToMarkVolatile(liveBehavior, unparentedBehavior, identifiers);
 
     LOG_WITH_STREAM(RemoteLayerBuffers, stream << "RemoteLayerBackingStoreCollection::markAllBackingStoreVolatileFromTimer pid " << getpid() << " - live " << m_liveBackingStore.computeSize() << ", unparented " << m_unparentedBackingStore.computeSize() << ", " << identifiers.size() << " buffers to set volatile: " << identifiers);
 

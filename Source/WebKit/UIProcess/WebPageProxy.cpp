@@ -902,6 +902,9 @@ WebPageProxy::Internals::Internals(WebPageProxy& page, bool processInheritedFrom
     , notificationManagerMessageHandler(page)
     , pageLoadState(page)
     , resetRecentCrashCountTimer(RunLoop::mainSingleton(), "WebPageProxy::Internals::ResetRecentCrashCountTimer"_s, &page, &WebPageProxy::resetRecentCrashCount)
+#if PLATFORM(MAC)
+    , obscuredContentInsetsCoalesceTimer(RunLoop::mainSingleton(), "WebPageProxy::Internals::ObscuredContentInsetsCoalesceTimer"_s, &page, &WebPageProxy::dispatchSetObscuredContentInsets)
+#endif
     , tryCloseTimeoutTimer(RunLoop::mainSingleton(), "WebPageProxy::Internals::TryCloseTimeoutTimer"_s, &page, &WebPageProxy::tryCloseTimedOut)
     , updateReportedMediaCaptureStateTimer(RunLoop::mainSingleton(), "updateReportedMediaCaptureStateTimer"_s, &page, &WebPageProxy::updateReportedMediaCaptureState)
 #if ENABLE(GAMEPAD)
@@ -3673,6 +3676,10 @@ void WebPageProxy::setObscuredContentInsets(const WebCore::FloatBoxExtent& obscu
         return;
 
     m_internals->obscuredContentInsets = obscuredContentInsets;
+#if PLATFORM(MAC)
+    m_internals->lastObscuredContentInsetsDispatchTime = MonotonicTime::now();
+    m_internals->obscuredContentInsetsCoalesceTimer.stop();
+#endif
 
     if (RefPtr pageClient = this->pageClient())
         pageClient->obscuredContentInsetsDidChange();
@@ -3683,7 +3690,10 @@ void WebPageProxy::setObscuredContentInsets(const WebCore::FloatBoxExtent& obscu
     protect(drawingArea())->updateDebugIndicator();
 
 #if PLATFORM(COCOA)
-    send(Messages::WebPage::SetObscuredContentInsetsFenced(m_internals->obscuredContentInsets, protect(drawingArea())->createFence()));
+    if (!is<RemoteLayerTreeDrawingAreaProxy>(drawingArea()))
+        send(Messages::WebPage::SetObscuredContentInsetsFenced(m_internals->obscuredContentInsets, protect(drawingArea())->createFence()));
+    else
+        send(Messages::WebPage::SetObscuredContentInsets(m_internals->obscuredContentInsets));
 #else
     send(Messages::WebPage::SetObscuredContentInsets(m_internals->obscuredContentInsets));
 #endif

@@ -86,37 +86,29 @@ void calculateMemoryCacheSizes(CacheModel cacheModel, unsigned& cacheTotalCapaci
         break;
     }
     case CacheModel::PrimaryWebBrowser: {
-        // back/forward cache capacity (in pages)
+        // Keep only the immediately previous page in BackForwardCache (preserves instant 1-step Back swipe
+        // while avoiding hoarding multiple heavyweight SPA pages across navigations).
         if (memorySize >= 512)
-            backForwardCacheCapacity = 2;
-        else if (memorySize >= 256)
             backForwardCacheCapacity = 1;
         else
             backForwardCacheCapacity = 0;
 
         // Object cache capacities (in bytes)
-        // (Testing indicates that value / MB depends heavily on content and
-        // browsing pattern. Even growth above 128MB can have substantial
-        // value / MB for some content / browsing patterns.)
-        if (memorySize >= 2048)
-            cacheTotalCapacity = 128 * MB;
-        else if (memorySize >= 1536)
-            cacheTotalCapacity = 96 * MB;
-        else if (memorySize >= 1024)
+        if (memorySize >= 1024)
             cacheTotalCapacity = 64 * MB;
         else if (memorySize >= 512)
             cacheTotalCapacity = 32 * MB;
         else
             cacheTotalCapacity = 16 * MB;
 
-        cacheMinDeadCapacity = cacheTotalCapacity / 4;
-        cacheMaxDeadCapacity = cacheTotalCapacity / 2;
+        cacheMinDeadCapacity = 0;
+        cacheMaxDeadCapacity = cacheTotalCapacity / 4;
 
         // This code is here to avoid a PLT regression. We can remove it if we
         // can prove that the overall system gain would justify the regression.
         cacheMaxDeadCapacity = std::max(24u, cacheMaxDeadCapacity);
 
-        deadDecodedDataDeletionInterval = 60_s;
+        deadDecodedDataDeletionInterval = 15_s;
 
         break;
     }

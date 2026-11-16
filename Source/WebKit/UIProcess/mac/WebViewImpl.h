@@ -1081,7 +1081,9 @@ private:
     id m_flagsChangedEventMonitor { nullptr };
 
     const UniqueRef<PAL::HysteresisActivity> m_contentRelativeViewsHysteresis;
+    const UniqueRef<PAL::HysteresisActivity> m_animatedFrameResizeHysteresis;
     const std::unique_ptr<PAL::HysteresisActivity> m_pageScrollingHysteresis;
+    MonotonicTime m_lastFrameSizeChangeTime;
     bool m_contentRelativeViewsNeedToBeRepositioned { false };
     bool m_cursorOverlapsSelection { false };
 

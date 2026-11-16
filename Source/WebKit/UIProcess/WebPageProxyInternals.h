@@ -332,6 +332,8 @@ public:
 #endif
 #if PLATFORM(MAC)
     std::optional<WebCore::FloatBoxExtent> pendingObscuredContentInsets;
+    RunLoop::Timer obscuredContentInsetsCoalesceTimer;
+    MonotonicTime lastObscuredContentInsetsDispatchTime;
 #endif
     RunLoop::Timer tryCloseTimeoutTimer;
     WebCore::Color underPageBackgroundColorOverride;
