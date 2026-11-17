@@ -1,0 +1,159 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub Release (uncheck for build-only artifact)'
+        required: true
+        type: boolean
+        default: true
+      tag:
+        description: 'Tag name (leave blank to auto-generate next vX.Y.Z-patched-webkit)'
+        required: false
+        type: string
+        default: ''
+      release_name:
+        description: 'Release title (leave blank to auto-generate)'
+        required: false
+        type: string
+        default: ''
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        type: boolean
+        default: false
+      runner:
+        description: 'Runner to build on'
+        required: false
+        type: choice
+        options:
+          - macos-latest
+          - self-hosted
+        default: macos-latest
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner == 'self-hosted' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'macos-latest' }}
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: Check disk space
+        run: df -h .
+
+      - name: Generate tag and release name
+        id: meta
+        run: |
+          git fetch --tags --depth=1 origin >/dev/null 2>&1 || true
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            LATEST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*-patched-webkit' --sort=-v:refname | head -n 1 || true)"
+            if [ -z "$LATEST_TAG" ]; then
+              TAG="v0.1.0-patched-webkit"
+            else
+              VER="${LATEST_TAG#v}"
+              VER="${VER%-patched-webkit}"
+              IFS='.' read -r MAJ MIN PAT <<< "$VER"
+              PAT="${PAT:-0}"
+              PAT=$((PAT + 1))
+              while git rev-parse -q --verify "refs/tags/v${MAJ}.${MIN}.${PAT}-patched-webkit" >/dev/null; do
+                PAT=$((PAT + 1))
+              done
+              TAG="v${MAJ}.${MIN}.${PAT}-patched-webkit"
+            fi
+          fi
+          TITLE="${{ inputs.release_name }}"
+          if [ -z "$TITLE" ]; then
+            TITLE="Patched WebKit ${TAG} (macOS arm64)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG title=$TITLE"
+
+      - name: Build WebKit (Release arm64)
+        run: |
+          Tools/Scripts/build-webkit --release --architecture=arm64 --only="Everything up to WebKit"
+
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          STAGE="dist/patched-webkit"
+          rm -rf dist WebKit-SafariFixes-macOS-arm64.tar.gz run-patched-safari.sh webkit-safari-memory-fixes.patch
+          mkdir -p "$STAGE"
+
+          for item in \
+            JavaScriptCore.framework \
+            WebCore.framework \
+            WebGPU.framework \
+            WebInspectorUI.framework \
+            WebKit.framework \
+            WebKitLegacy.framework \
+            _WebKit_SwiftUI.framework \
+            com.apple.WebKit.GPU.xpc \
+            com.apple.WebKit.Model.xpc \
+            com.apple.WebKit.Networking.xpc \
+            com.apple.WebKit.WebContent.xpc \
+            com.apple.WebKit.WebContent.Development.xpc \
+            com.apple.WebKit.WebContent.CaptivePortal.xpc \
+            com.apple.WebKit.WebContent.EnhancedSecurity.xpc \
+            libANGLE-shared.dylib \
+            libwebrtc.dylib
+          do
+            SRC="WebKitBuild/Release/$item"
+            if [ -e "$SRC" ]; then
+              ditto "$SRC" "$STAGE/$item"
+            fi
+          done
+
+          cat > run-patched-safari.sh <<'EOF'
+          #!/bin/zsh
+          set -euo pipefail
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export DYLD_FRAMEWORK_PATH="$DIR"
+          export __XPC_DYLD_FRAMEWORK_PATH="$DIR"
+          export DYLD_LIBRARY_PATH="$DIR"
+          export __XPC_DYLD_LIBRARY_PATH="$DIR"
+          export WEBKIT_UNSET_DYLD_FRAMEWORK_PATH="YES"
+          exec /Applications/Safari.app/Contents/MacOS/SafariForWebKitDevelopment "$@"
+          EOF
+          chmod +x run-patched-safari.sh
+          cp run-patched-safari.sh "$STAGE/run-patched-safari.sh"
+
+          tar -C dist -czf WebKit-SafariFixes-macOS-arm64.tar.gz patched-webkit
+
+          git fetch origin main --depth=1 >/dev/null 2>&1 || true
+          BASE_SHA="$(git merge-base origin/main HEAD 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n 1)"
+          git diff "${BASE_SHA}..HEAD" > webkit-safari-memory-fixes.patch
+
+          shasum -a 256 WebKit-SafariFixes-macOS-arm64.tar.gz run-patched-safari.sh webkit-safari-memory-fixes.patch
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebKit-SafariFixes-${{ steps.meta.outputs.tag }}-macOS-arm64
+          path: |
+            WebKit-SafariFixes-macOS-arm64.tar.gz
+            run-patched-safari.sh
+            webkit-safari-memory-fixes.patch
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FLAGS=(--generate-notes --title "${{ steps.meta.outputs.title }}" --target "${{ github.sha }}")
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            WebKit-SafariFixes-macOS-arm64.tar.gz \
+            run-patched-safari.sh \
+            webkit-safari-memory-fixes.patch \
+            "${FLAGS[@]}"
