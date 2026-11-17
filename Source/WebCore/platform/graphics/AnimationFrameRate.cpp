@@ -57,7 +57,13 @@ std::optional<FramesPerSecond> preferredFramesPerSecond(OptionSet<ThrottlingReas
         return FullSpeedFramesPerSecond;
     }
 
-    auto framesPerSecond = preferFrameRatesNear60FPS ? framesPerSecondNearestFullSpeed(*nominalFramesPerSecond) : *nominalFramesPerSecond;
+    auto framesPerSecond =
+#if !PLATFORM(IOS_FAMILY)
+        *nominalFramesPerSecond;
+    UNUSED_PARAM(preferFrameRatesNear60FPS);
+#else
+        preferFrameRatesNear60FPS ? framesPerSecondNearestFullSpeed(*nominalFramesPerSecond) : *nominalFramesPerSecond;
+#endif
     if (reasons.containsAny(halfSpeedThrottlingReasons))
         framesPerSecond /= IntervalThrottlingFactor;
 
@@ -76,7 +82,13 @@ Seconds preferredFrameInterval(OptionSet<ThrottlingReason> reasons, std::optiona
         return FullSpeedAnimationInterval;
     }
 
-    auto framesPerSecond = preferFrameRatesNear60FPS ? framesPerSecondNearestFullSpeed(*nominalFramesPerSecond) : *nominalFramesPerSecond;
+    auto framesPerSecond =
+#if !PLATFORM(IOS_FAMILY)
+        *nominalFramesPerSecond;
+    UNUSED_PARAM(preferFrameRatesNear60FPS);
+#else
+        preferFrameRatesNear60FPS ? framesPerSecondNearestFullSpeed(*nominalFramesPerSecond) : *nominalFramesPerSecond;
+#endif
     auto interval = Seconds(1.0 / framesPerSecond);
 
     if (reasons.containsAny(halfSpeedThrottlingReasons))

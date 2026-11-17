@@ -47,12 +47,13 @@ WTF_EXPORT_PRIVATE bool MemoryPressureHandler::ReliefLogger::s_loggingEnabled = 
 #if PLATFORM(IOS_FAMILY)
 static const double s_conservativeThresholdFraction = 0.5;
 static const double s_strictThresholdFraction = 0.65;
+static const Seconds s_pollInterval = 30_s;
 #else
-static const double s_conservativeThresholdFraction = 0.33;
-static const double s_strictThresholdFraction = 0.5;
+static const double s_conservativeThresholdFraction = 0.25;
+static const double s_strictThresholdFraction = 0.35;
+static const Seconds s_pollInterval = 10_s;
 #endif
 static const std::optional<double> s_killThresholdFraction;
-static const Seconds s_pollInterval = 30_s;
 
 static std::atomic<bool> s_hasCreatedMemoryPressureHandler;
 
@@ -231,6 +232,13 @@ void MemoryPressureHandler::measurementTimerFired()
     RELEASE_LOG(MemoryPressure, "Current memory footprint: %zu MB", footprint / MB);
 #endif
 
+    if (m_memoryFootprintNotificationThresholds.size() && footprint > m_memoryFootprintNotificationThresholds.last()) {
+        // Aggressively reclaim caches, JS garbage, and free FastMalloc pages before notifying
+        // the host app so heavy tabs can shrink back below its memory reload threshold.
+        releaseMemory(Critical::Yes, Synchronous::Yes);
+        footprint = memoryFootprint();
+    }
+
     while (m_memoryFootprintNotificationThresholds.size() && footprint > m_memoryFootprintNotificationThresholds.last()) {
         auto notificationThreshold = m_memoryFootprintNotificationThresholds.takeLast();
         m_memoryFootprintNotificationHandler(notificationThreshold);
@@ -246,6 +254,15 @@ void MemoryPressureHandler::measurementTimerFired()
 
     switch (m_memoryUsagePolicy) {
     case MemoryUsagePolicy::Unrestricted:
+#if !PLATFORM(IOS_FAMILY)
+        // Chromium Memory Saver style reclamation for background/inactive tabs before hitting strict limits.
+        if (m_processState == WebsamProcessState::Inactive) {
+            if (footprint >= 640 * MB)
+                releaseMemory(Critical::Yes, Synchronous::No);
+            else if (footprint >= 384 * MB)
+                releaseMemory(Critical::No, Synchronous::No);
+        }
+#endif
         break;
     case MemoryUsagePolicy::Conservative:
         releaseMemory(Critical::No, Synchronous::No);

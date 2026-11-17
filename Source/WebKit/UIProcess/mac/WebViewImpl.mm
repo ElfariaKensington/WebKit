@@ -2439,7 +2439,8 @@ void WebViewImpl::screenDidChangeColorSpace()
 
 void WebViewImpl::applicationShouldSuppressHDR(bool suppress)
 {
-    m_page->setShouldSuppressHDR(suppress);
+    // Keep full EDR headroom when Safari is inactive.
+    UNUSED_PARAM(suppress);
 }
 
 bool WebViewImpl::mightBeginDragWhileInactive()
@@ -5794,12 +5795,12 @@ void WebViewImpl::magnifyWithEvent(NSEvent *event)
     if (auto webEvent = NativeWebGestureEvent::create(event, m_view.getAutoreleased()))
         m_page->handleGestureEvent(*webEvent);
 #else
-    // Forward pinch-in gestures at minimum zoom (and pre-active-gesture events) through
+    // Forward pinch-out gestures at minimum zoom (and pre-active neutral Began frames) through
     // _web_gestureEventWasNotHandledByWebCore: so host views (e.g., Safari's Visual Tab Picker)
-    // can intercept pinch-to-Tab-Overview before falling back to ViewGestureController.
+    // can intercept pinch-to-Tab-Overview before falling back into ViewGestureController.
     bool maybeHostZoomOut = gestureController->magnification() <= m_page->minPageZoomFactor()
-        && (magnification < 0 || phase == WebEventPhase::Ended || phase == WebEventPhase::Cancelled);
-    if (gestureController->hasActiveMagnificationGesture() && !maybeHostZoomOut) {
+        && (magnification < 0 || (!gestureController->hasActiveMagnificationGesture() && !magnification) || phase == WebEventPhase::Ended || phase == WebEventPhase::Cancelled);
+    if (!maybeHostZoomOut) {
         gestureController->handleMagnificationGesture(magnification, phase, [m_view.get() convertPoint:event.locationInWindow fromView:nil]);
         return;
     }
@@ -5878,12 +5879,8 @@ void WebViewImpl::magnificationGestureEventWasNotHandledByWebCoreFromViewOnly(NS
 
 void WebViewImpl::applyNativeMagnification(float magnification, WebEventPhase phase, FloatPoint originInViewCoordinates, WebEventInputSource inputSource)
 {
-#if ENABLE(MAC_GESTURE_EVENTS)
-    if (m_allowsMagnification && m_gestureController)
-        m_gestureController->handleMagnificationGesture(magnification, phase, originInViewCoordinates, inputSource);
-#else
-    UNUSED_PARAM(inputSource);
-#endif
+    if (m_allowsMagnification)
+        protect(ensureGestureController())->handleMagnificationGesture(magnification, phase, originInViewCoordinates, inputSource);
 }
 
 void WebViewImpl::didRestoreScrollPosition()

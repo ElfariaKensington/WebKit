@@ -168,7 +168,7 @@ NODELETE static size_t maxEdenSizeForRateLimiting(GrowthMode growthMode, size_t 
 {
     // Only do rate limiting for Aggressive heaps.
     if (growthMode == GrowthMode::Aggressive)
-        return Options::maxEdenSizeForRateLimitingMultiplier() * minBytesPerCycle;
+        return std::min(Options::maxEdenSizeForRateLimitingMultiplier(), 4.0) * minBytesPerCycle;
     return 0.0;
 }
 
@@ -187,9 +187,15 @@ static size_t proportionalHeapSize(size_t heapSize, GrowthMode growthMode, size_
 #endif
 
     if (useNewHeapGrowthFactor) {
+        double maxIncrease = std::min(Options::heapGrowthMaxIncrease(), 1.50);
         double x = static_cast<double>(std::min(heapSize, ramSize)) / ramSize;
-        double ratio = Options::heapGrowthMaxIncrease() * std::exp(-(Options::heapGrowthSteepnessFactor() * x)) + 1;
-        return ratio * heapSize;
+        double ratio = maxIncrease * std::exp(-(Options::heapGrowthSteepnessFactor() * x)) + 1;
+#if USE(MEMORY_FOOTPRINT_API)
+        size_t memoryFootprint = WTF::memoryFootprint();
+        double footprintCap = memoryFootprint >= 768 * MB ? 1.24 : (memoryFootprint >= 384 * MB ? 1.40 : (maxIncrease + 1.0));
+        ratio = std::min(ratio, footprintCap);
+#endif
+        return static_cast<size_t>(ratio * heapSize);
     }
 
 #if USE(MEMORY_FOOTPRINT_API)
@@ -635,6 +641,11 @@ bool Heap::overCriticalMemoryThreshold(MemoryThresholdCallType memoryThresholdCa
 #if USE(MEMORY_FOOTPRINT_API)
     if (memoryThresholdCallType == MemoryThresholdCallType::Direct || ++m_percentAvailableMemoryCachedCallCount >= 100) {
         m_overCriticalMemoryThreshold = WTF::percentAvailableMemoryInUse() > Options::criticalGCMemoryThreshold();
+#if !PLATFORM(IOS_FAMILY)
+        // Treat high per-process footprint as critical so heavy tabs shrink like V8 even on high-RAM Macs.
+        if (!m_overCriticalMemoryThreshold && WTF::memoryFootprint() >= 640 * MB)
+            m_overCriticalMemoryThreshold = true;
+#endif
         m_percentAvailableMemoryCachedCallCount = 0;
     }
 
@@ -1944,7 +1955,7 @@ void Heap::updateAllocationLimits()
         size_t lastMaxHeapSize = m_maxHeapSize;
         m_maxHeapSize = std::max(m_minBytesPerCycle, proportionalHeapSize(currentHeapSize, m_growthMode, m_ramSize));
         m_maxEdenSize = m_maxHeapSize - currentHeapSize;
-        if (m_isInOpportunisticTask && !isCritical) {
+        if (m_isInOpportunisticTask && !isCritical && m_maxHeapSize < 256 * MB) {
             // After an Opportunistic Full GC, we allow eden to occupy all the space we recovered.
             // In this case, m_maxHeapSize may be larger than currentHeapSize + m_maxEdenSize.
             // Note that m_maxEdenSize is still used when we increase m_maxHeapSize after an

@@ -5175,7 +5175,7 @@ void WebPage::visibilityDidChange()
         }
 #if PLATFORM(MAC)
         markLayersVolatile();
-        WebCore::releaseMemory(Critical::No, Synchronous::Yes, WebCore::MaintainBackForwardCache::Yes, WebCore::MaintainMemoryCache::No);
+        WebCore::releaseMemory(Critical::No, Synchronous::Yes, WebCore::MaintainBackForwardCache::Yes, WebCore::MaintainMemoryCache::Yes);
         WebCore::GarbageCollectionController::singleton().garbageCollectSoon();
 #endif
     }

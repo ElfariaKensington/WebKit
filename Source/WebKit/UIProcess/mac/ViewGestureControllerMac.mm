@@ -139,7 +139,7 @@ void ViewGestureController::handleMagnificationGesture(double scale, WebEventPha
     ASSERT(m_activeGestureType == ViewGestureType::None || m_activeGestureType == ViewGestureType::Magnification);
 
     if (m_activeGestureType == ViewGestureType::None) {
-        if (phase != WebEventPhase::Began)
+        if (phase != WebEventPhase::Began && !(phase == WebEventPhase::Changed && scale > 0))
             return;
 
         // FIXME: We drop the first frame of the gesture on the floor, because we don't have the visible content bounds yet.

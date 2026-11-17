@@ -1450,18 +1450,8 @@ void WebProcessPool::didCollectScreenProperties(WebCore::ScreenProperties&& scre
 
 void WebProcessPool::applyEDRSuppressionIfNeeded(WebCore::ScreenProperties& screenProperties)
 {
-#if HAVE(SUPPORT_HDR_DISPLAY)
-    if (!m_suppressEDR)
-        return;
-
-    for (auto& properties : screenProperties.screenDataMap.values()) {
-        constexpr auto maxSuppressedHeadroom = 1.6f;
-        properties.currentEDRHeadroom = std::min(maxSuppressedHeadroom, properties.currentEDRHeadroom);
-        properties.suppressEDR = true;
-    }
-#else
+    // Keep full EDR headroom when Safari is inactive.
     UNUSED_PARAM(screenProperties);
-#endif
 }
 
 #if PLATFORM(MAC)

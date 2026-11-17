@@ -2067,8 +2067,13 @@ void Document::addVisualUpdatePreventedReason(VisualUpdatesPreventedReason reaso
     if (completePageTransition == CompletePageTransition::Yes)
         m_visualUpdatesAllowedChangeCompletesPageTransition = true;
 
-    if (!m_visualUpdatesSuppressionTimer.isActive() && visualUpdatePreventReasonsClearedByTimer().contains(reason))
-        m_visualUpdatesSuppressionTimer.startOneShot(1_s * settings().incrementalRenderingSuppressionTimeoutInSeconds());
+    if (!m_visualUpdatesSuppressionTimer.isActive() && visualUpdatePreventReasonsClearedByTimer().contains(reason)) {
+        double timeoutSeconds = settings().incrementalRenderingSuppressionTimeoutInSeconds();
+#if !PLATFORM(IOS_FAMILY)
+        timeoutSeconds = std::min(timeoutSeconds, 1.25);
+#endif
+        m_visualUpdatesSuppressionTimer.startOneShot(1_s * timeoutSeconds);
+    }
 }
 
 void Document::removeVisualUpdatePreventedReasons(OptionSet<VisualUpdatesPreventedReason> reasons)

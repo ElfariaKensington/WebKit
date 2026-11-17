@@ -97,7 +97,7 @@ void jettisonExpensiveObjectsOnTopLevelNavigation()
     MemoryCache::singleton().pruneDeadResourcesToSize(0);
     GlyphDisplayListCache::singleton().clear();
     HTMLNameCache::clear();
-    GarbageCollectionController::singleton().garbageCollectSoon();
+    GarbageCollectionController::singleton().garbageCollectNowIfNotDoneRecently();
     WTF::releaseFastMallocFreeMemory();
 }
 

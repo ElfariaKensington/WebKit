@@ -456,14 +456,14 @@ FloatRect TileController::adjustTileCoverageForDesktopPageScrolling(const FloatR
     // Inflate the coverage rect so that it covers 2x of the visible width and 3x of the visible height.
     // These values were chosen because it's more common to have tall pages and to scroll vertically,
     // so we keep more tiles above and below the current area.
-    float widthScale = 1;
-    float heightScale = 1;
+    float widthScale = 1.25;
+    float heightScale = 1.5;
 
     if (m_tileCoverage & CoverageForHorizontalScrolling && !largeVisibleRectChange)
         widthScale = 2;
 
     if (m_tileCoverage & CoverageForVerticalScrolling && !largeVisibleRectChange)
-        heightScale = 3;
+        heightScale = 3.5;
 
     coverageSize.scale(widthScale, heightScale);
 
