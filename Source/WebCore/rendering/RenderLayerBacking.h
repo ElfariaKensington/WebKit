@@ -581,6 +581,7 @@ private:
     bool m_requiresBackgroundLayer { false };
     bool m_hasSubpixelRounding { false };
 #if ENABLE(ASYNC_SCROLLING)
+    std::optional<unsigned> m_lastEventRegionLayoutCount;
     bool m_needsEventRegionUpdate { true };
 #endif
     bool m_shouldPaintUsingCompositeCopy { false };

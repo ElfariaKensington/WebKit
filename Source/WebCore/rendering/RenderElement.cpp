@@ -1048,6 +1048,10 @@ void RenderElement::styleWillChange(Style::Difference diff, const Style::Compute
         auto needsInvalidateEventRegion = [&] {
             if (style().usedPointerEvents() != newStyle.usedPointerEvents())
                 return true;
+            if (visibilityChanged)
+                return true;
+            if (!hasLayer() && style().transform() != newStyle.transform())
+                return true;
 #if ENABLE(TOUCH_ACTION_REGIONS)
             if (style().usedTouchAction() != newStyle.usedTouchAction())
                 return true;

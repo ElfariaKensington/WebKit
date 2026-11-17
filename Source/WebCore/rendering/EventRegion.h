@@ -64,6 +64,7 @@ public:
     bool isEventRegionContext() const final { return true; }
 
     enum class ContributeToInteractionRegions : bool { No, Yes };
+    WEBCORE_EXPORT bool needsUnite(const IntRect&, const RenderObject&, const Style::ComputedStyle&, bool overrideUserModifyIsEditable = false) const;
     WEBCORE_EXPORT void unite(const FloatRoundedRect&, const RenderObject&, const Style::ComputedStyle&, bool overrideUserModifyIsEditable = false, ContributeToInteractionRegions = ContributeToInteractionRegions::Yes);
     bool contains(const IntRect&) const;
 

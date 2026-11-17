@@ -5794,7 +5794,20 @@ void WebViewImpl::magnifyWithEvent(NSEvent *event)
     if (auto webEvent = NativeWebGestureEvent::create(event, m_view.getAutoreleased()))
         m_page->handleGestureEvent(*webEvent);
 #else
-    gestureController->handleMagnificationGesture(magnification, phase, [m_view.get() convertPoint:event.locationInWindow fromView:nil]);
+    // Forward pinch-in gestures at minimum zoom (and pre-active-gesture events) through
+    // _web_gestureEventWasNotHandledByWebCore: so host views (e.g., Safari's Visual Tab Picker)
+    // can intercept pinch-to-Tab-Overview before falling back to ViewGestureController.
+    bool maybeHostZoomOut = gestureController->magnification() <= m_page->minPageZoomFactor()
+        && (magnification < 0 || phase == WebEventPhase::Ended || phase == WebEventPhase::Cancelled);
+    if (gestureController->hasActiveMagnificationGesture() && !maybeHostZoomOut) {
+        gestureController->handleMagnificationGesture(magnification, phase, [m_view.get() convertPoint:event.locationInWindow fromView:nil]);
+        return;
+    }
+
+    if (gestureController->hasActiveMagnificationGesture() && (phase == WebEventPhase::Ended || phase == WebEventPhase::Cancelled))
+        gestureController->handleMagnificationGesture(magnification, phase, [m_view.get() convertPoint:event.locationInWindow fromView:nil]);
+
+    [m_view.get() _web_gestureEventWasNotHandledByWebCore:event];
 #endif
 }
 

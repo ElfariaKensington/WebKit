@@ -3680,7 +3680,7 @@ void RenderLayer::paintLayerContentsAndReflection(GraphicsContext& context, cons
 
 bool RenderLayer::setupFontSubpixelQuantization(GraphicsContext& context, bool& didQuantizeFonts)
 {
-    if (context.paintingDisabled())
+    if (context.paintingDisabled() || !context.shouldSubpixelQuantizeFonts())
         return false;
 
     CheckedPtr box = dynamicDowncast<RenderBox>(renderer());

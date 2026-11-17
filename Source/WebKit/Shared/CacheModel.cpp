@@ -94,21 +94,23 @@ void calculateMemoryCacheSizes(CacheModel cacheModel, unsigned& cacheTotalCapaci
             backForwardCacheCapacity = 0;
 
         // Object cache capacities (in bytes)
-        if (memorySize >= 1024)
-            cacheTotalCapacity = 64 * MB;
+        if (memorySize >= 2048)
+            cacheTotalCapacity = 128 * MB;
+        else if (memorySize >= 1024)
+            cacheTotalCapacity = 96 * MB;
         else if (memorySize >= 512)
             cacheTotalCapacity = 32 * MB;
         else
             cacheTotalCapacity = 16 * MB;
 
-        cacheMinDeadCapacity = 0;
+        cacheMinDeadCapacity = cacheTotalCapacity / 8;
         cacheMaxDeadCapacity = cacheTotalCapacity / 4;
 
         // This code is here to avoid a PLT regression. We can remove it if we
         // can prove that the overall system gain would justify the regression.
         cacheMaxDeadCapacity = std::max(24u, cacheMaxDeadCapacity);
 
-        deadDecodedDataDeletionInterval = 15_s;
+        deadDecodedDataDeletionInterval = 45_s;
 
         break;
     }

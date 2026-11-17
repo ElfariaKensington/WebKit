@@ -185,6 +185,7 @@ protected:
 
     bool shouldCoalesceVisualEditorStateUpdates() const override { return true; }
 
+    ProcessState* processStateIfActiveForConnection(IPC::Connection&);
     ProcessState& processStateForConnection(IPC::Connection&);
     NODELETE const ProcessState& processStateForIdentifier(WebCore::ProcessIdentifier) const;
     IPC::Connection* connectionForIdentifier(WebCore::ProcessIdentifier);

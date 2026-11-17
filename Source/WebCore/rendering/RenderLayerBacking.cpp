@@ -2673,6 +2673,7 @@ void RenderLayerBacking::updateEventRegion()
 #endif
 
     setNeedsEventRegionUpdate(false);
+    m_lastEventRegionLayoutCount = renderer().view().frameView().layoutContext().layoutUpdateCount();
 }
 #endif
 
@@ -4496,7 +4497,9 @@ void RenderLayerBacking::setContentsNeedDisplay(GraphicsLayer::ShouldClipToLayer
     if (!m_owningLayer.isRenderViewLayer())
         m_owningLayer.setNeedsCompositingConfigurationUpdate();
 
-    m_owningLayer.invalidateEventRegion(RenderLayer::EventRegionInvalidationReason::Paint);
+    auto& layoutContext = renderer().view().frameView().layoutContext();
+    if (!m_owningLayer.isRenderViewLayer() || !m_lastEventRegionLayoutCount || *m_lastEventRegionLayoutCount != layoutContext.layoutUpdateCount() || layoutContext.isInRenderTreeLayout())
+        m_owningLayer.invalidateEventRegion(RenderLayer::EventRegionInvalidationReason::Paint);
 
 #if ENABLE(AX_CUSTOM_COLOR_MODE)
     // Without a controller no pass has run yet, and the first one will cover this repaint anyway.
@@ -4546,7 +4549,9 @@ void RenderLayerBacking::setContentsNeedDisplayInRect(const LayoutRect& r, Graph
     if (!m_owningLayer.isRenderViewLayer())
         m_owningLayer.setNeedsCompositingConfigurationUpdate();
 
-    m_owningLayer.invalidateEventRegion(RenderLayer::EventRegionInvalidationReason::Paint);
+    auto& layoutContext = renderer().view().frameView().layoutContext();
+    if (!m_owningLayer.isRenderViewLayer() || !m_lastEventRegionLayoutCount || *m_lastEventRegionLayoutCount != layoutContext.layoutUpdateCount() || layoutContext.isInRenderTreeLayout())
+        m_owningLayer.invalidateEventRegion(RenderLayer::EventRegionInvalidationReason::Paint);
 
 #if ENABLE(AX_CUSTOM_COLOR_MODE)
     // Without a controller no pass has run yet, and the first one will cover this repaint anyway.

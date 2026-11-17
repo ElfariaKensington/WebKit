@@ -27,6 +27,7 @@
 #include "LayoutIntegrationInlineContentPainter.h"
 
 #include "EllipsisBoxPainter.h"
+#include "EventRegion.h"
 #include "InlineBoxPainter.h"
 #include "InlineDisplayBoxInlines.h"
 #include "OutlinePainter.h"
@@ -127,6 +128,20 @@ void InlineContentPainter::paintDisplayBox(const InlineDisplay::Box& box)
         if (CheckedPtr subtreePaintRoot = m_paintInfo.subtreePaintRoot) {
             CheckedPtr renderer = box.layoutBox().rendererForIntegration();
             if (renderer != subtreePaintRoot && !renderer->isDescendantOf(subtreePaintRoot))
+                return;
+        }
+
+        if (m_paintInfo.phase == PaintPhase::EventRegion) {
+            if (CheckedPtr renderer = box.layoutBox().rendererForIntegration()) {
+                constexpr OptionSet<HitTestRequest::Type> hitType { HitTestRequest::Type::IgnoreCSSPointerEventsProperty };
+                if (!renderer->parent()->visibleToHitTesting(hitType))
+                    return;
+                auto visualRect = LayoutRect { box.blockStartRelativePhysicalRect() };
+                root().blockStartRelativeToPhysical(visualRect);
+                visualRect.moveBy(m_paintOffset);
+                if (!m_paintInfo.eventRegionContext()->needsUnite(enclosingIntRect(visualRect), *renderer, box.style()))
+                    return;
+            } else
                 return;
         }
 

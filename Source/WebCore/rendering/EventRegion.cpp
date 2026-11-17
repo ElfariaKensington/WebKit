@@ -52,6 +52,77 @@ EventRegionContext::EventRegionContext(EventRegion& eventRegion)
 
 EventRegionContext::~EventRegionContext() = default;
 
+bool EventRegionContext::needsUnite(const IntRect& boundsInContextRoot, const RenderObject& renderer, const Style::ComputedStyle& style, bool overrideUserModifyIsEditable) const
+{
+    if (renderer.usedPointerEvents() == PointerEvents::None)
+        return false;
+
+    if (boundsInContextRoot.isEmpty())
+        return false;
+
+#if ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
+    if (renderer.page().shouldBuildInteractionRegions())
+        return true;
+#endif
+
+    if (!m_transformStack.isEmpty())
+        return true;
+
+#if ENABLE(TOUCH_ACTION_REGIONS)
+    if (m_eventRegion.hasTouchActions() || !style.usedTouchAction().isAuto())
+        return true;
+#endif
+
+#if ENABLE(EDITABLE_REGION)
+    if (m_eventRegion.hasEditableRegion() && (overrideUserModifyIsEditable || style.usedUserModify() != UserModify::ReadOnly))
+        return true;
+#else
+    UNUSED_PARAM(overrideUserModifyIsEditable);
+#endif
+
+    if (!m_eventRegion.contains(boundsInContextRoot))
+        return true;
+
+    auto eventListenerRegionTypes = style.eventListenerRegionTypes();
+#if ENABLE(WHEEL_EVENT_REGIONS)
+    if (renderer.isRenderListBox())
+        eventListenerRegionTypes.add(EventListenerRegionType::NonPassiveWheel);
+    if (eventListenerRegionTypes.contains(EventListenerRegionType::Wheel) && !m_eventRegion.eventListenerRegionForType(EventListenerRegionType::Wheel).contains(boundsInContextRoot))
+        return true;
+    if (eventListenerRegionTypes.contains(EventListenerRegionType::NonPassiveWheel) && !m_eventRegion.eventListenerRegionForType(EventListenerRegionType::NonPassiveWheel).contains(boundsInContextRoot))
+        return true;
+#endif
+#if ENABLE(TOUCH_EVENT_REGIONS)
+    for (auto type : eventListenerRegionTypes) {
+        switch (type) {
+        case EventListenerRegionType::TouchStart:
+        case EventListenerRegionType::NonPassiveTouchStart:
+        case EventListenerRegionType::TouchEnd:
+        case EventListenerRegionType::NonPassiveTouchEnd:
+        case EventListenerRegionType::TouchMove:
+        case EventListenerRegionType::NonPassiveTouchMove:
+        case EventListenerRegionType::TouchCancel:
+        case EventListenerRegionType::NonPassiveTouchCancel:
+        case EventListenerRegionType::PointerDown:
+        case EventListenerRegionType::NonPassivePointerDown:
+        case EventListenerRegionType::PointerUp:
+        case EventListenerRegionType::NonPassivePointerUp:
+        case EventListenerRegionType::PointerMove:
+        case EventListenerRegionType::NonPassivePointerMove:
+        case EventListenerRegionType::PointerCancel:
+        case EventListenerRegionType::NonPassivePointerCancel:
+        case EventListenerRegionType::MouseClick:
+            return true;
+        case EventListenerRegionType::Wheel:
+        case EventListenerRegionType::NonPassiveWheel:
+            break;
+        }
+    }
+#endif
+
+    return false;
+}
+
 void EventRegionContext::unite(const FloatRoundedRect& roundedRect, const RenderObject& renderer, const Style::ComputedStyle& style, bool overrideUserModifyIsEditable, ContributeToInteractionRegions contributeToInteractionRegions)
 {
     auto transformAndClipIfNeeded = [&](auto input, auto transform) {

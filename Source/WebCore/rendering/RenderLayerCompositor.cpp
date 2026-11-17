@@ -1100,17 +1100,23 @@ bool RenderLayerCompositor::updateCompositingLayers(CompositingUpdateType update
 
     if (updateType == CompositingUpdateType::OnScroll || updateType == CompositingUpdateType::OnCompositedScroll) {
         // We only get here if we didn't scroll on the scrolling thread, so this update needs to re-position viewport-constrained layers.
+        bool hasNonCompositedViewportConstrained = false;
         if (m_renderView->settings().acceleratedCompositingForFixedPositionEnabled() && isPageScroll) {
             if (auto* viewportConstrainedObjects = m_renderView->frameView().viewportConstrainedObjects()) {
                 for (auto& renderer : *viewportConstrainedObjects) {
-                    if (auto* layer = renderer.layer())
+                    if (auto* layer = renderer.layer()) {
                         layer->setNeedsCompositingGeometryUpdate();
+                        if (!layer->isComposited())
+                            hasNonCompositedViewportConstrained = true;
+                    }
                 }
             }
         }
 
-        // Scrolling can affect overlap. FIXME: avoid for page scrolling.
-        updateRoot->setDescendantsNeedCompositingRequirementsTraversal();
+        // Scrolling can affect overlap, but if all viewport-constrained objects on a page scroll
+        // are already composited layers, avoid full-tree requirements traversal over every layer.
+        if (!isPageScroll || hasNonCompositedViewportConstrained)
+            updateRoot->setDescendantsNeedCompositingRequirementsTraversal();
     }
 
     if (updateType == CompositingUpdateType::AfterLayout) {
