@@ -312,6 +312,12 @@ private:
             } else if (match(attributeName, asyncAttr)) {
                 m_scriptIsAsync = true;
                 break;
+#if PLATFORM(MAC)
+            } else if (match(attributeName, deferAttr)) {
+                // Blink's preload scanner gives defer scripts the same kLazyLoad priority as async ones.
+                m_scriptIsAsync = true;
+                break;
+#endif
             } else if (match(attributeName, fetchpriorityAttr)) {
                 m_fetchPriority = parseEnumerationFromString<RequestPriority>(attributeValue.toString()).value_or(RequestPriority::Auto);
                 break;

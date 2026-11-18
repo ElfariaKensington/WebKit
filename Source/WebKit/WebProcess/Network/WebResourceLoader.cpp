@@ -370,6 +370,10 @@ void WebResourceLoader::didReceiveData(IPC::SharedBufferReference&& data, uint64
 void WebResourceLoader::didFinishResourceLoad(NetworkLoadMetrics&& networkLoadMetrics)
 {
     RefPtr coreLoader = m_coreLoader;
+#if PLATFORM(MAC)
+    if (coreLoader && !networkLoadMetrics.protocol.isEmpty())
+        WebProcess::singleton().webLoaderStrategy().chromiumResourceScheduler().didReceiveProtocol(coreLoader->url(), networkLoadMetrics.protocol);
+#endif
     LOG_WITH_STREAM(Network, stream << "(WebProcess) WebResourceLoader::didFinishResourceLoad for '"_s << coreLoader->url().string() << "'"_s);
     WEBRESOURCELOADER_RELEASE_LOG(WebResourceLoaderDidFinishResourceLoad, static_cast<uint64_t>(m_numBytesReceived));
 

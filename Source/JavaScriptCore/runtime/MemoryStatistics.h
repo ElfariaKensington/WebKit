@@ -39,4 +39,33 @@ struct GlobalMemoryStatistics {
 
 JS_EXPORT_PRIVATE GlobalMemoryStatistics globalMemoryStatistics();
 
+#if PLATFORM(MAC)
+class VM;
+
+// Embedder interface to the V8 heap-limit port in Heap.cpp (v8/src/heap/heap-controller.cc and heap.cc).
+// The setters are process-wide, like the isolate-level V8 notifications they mirror.
+JS_EXPORT_PRIVATE void setHeapIsBackgrounded(bool); // v8::Isolate::SetPriority(Priority::kBestEffort)
+JS_EXPORT_PRIVATE void setHeapHighMemoryPressure(bool); // v8::Isolate::MemoryPressureNotification(kCritical / kNone)
+
+// What V8's MemoryReducer::TimerTask reads from the heap; taking it also samples the allocation rate.
+struct HeapGrowingStatistics {
+    size_t sizeOfObjects { 0 };
+    size_t committedMemory { 0 };
+    unsigned fullCollectionCount { 0 };
+    bool isCollecting { false };
+    bool hasLowAllocationRate { false }; // Heap::HasLowAllocationRate
+    bool shouldOptimizeForMemoryUsage { false }; // Heap::ShouldOptimizeForMemoryUsage
+    bool hasHighFragmentation { false }; // Heap::HasHighFragmentation
+};
+JS_EXPORT_PRIVATE HeapGrowingStatistics sampleHeapGrowingStatistics(VM&);
+// Heap::StartIncrementalMarking(GCFlag::kReduceMemoryFootprint, kMemoryReducer): a concurrent full collection
+// whose new limit uses HeapGrowingMode::kMinimal.
+JS_EXPORT_PRIVATE void startMemoryReducerCollection(VM&);
+JS_EXPORT_PRIVATE void setHeapMemoryReducerIsDone(VM&, bool); // MemoryReducer::ShouldGrowHeapSlowly
+// v8::Isolate::ContextDisposedNotification(kNoDependants) -> Heap::NotifyContextDisposed: the main frame's global
+// object went away (navigation or reload), so the allocation limit returns to the initial limit, which then shrinks
+// toward the live size on every young collection and brings the old page's garbage to a full collection quickly.
+JS_EXPORT_PRIVATE void notifyHeapContextDisposed(VM&);
+#endif
+
 } // namespace JSC

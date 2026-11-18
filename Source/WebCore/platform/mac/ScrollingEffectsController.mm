@@ -599,12 +599,24 @@ bool ScrollingEffectsController::applyScrollDeltaWithStretching(const PlatformWh
 #else
     auto stretchAmount = m_client.stretchAmount();
 
-    FloatSize adjustedDelta = deltaAdjustedForRefreshController(delta, verticalDeltaOpposesStretch);
+#if HAVE(NSREFRESHCONTROLLER)
+    const auto activationHeight = m_client.refreshControllerSnappingThreshold();
+    const bool isRefreshControllerPull = m_client.hasRefreshController()
+        && activationHeight > 0
+        && !m_momentumScrollInProgress
+        && !verticalDeltaOpposesStretch
+        && delta.height() < 0
+        && stretchAmount.height() <= 0;
+#else
+    constexpr bool isRefreshControllerPull = false;
+#endif
+
+    FloatSize adjustedDelta = isRefreshControllerPull ? delta : deltaAdjustedForRefreshController(delta, verticalDeltaOpposesStretch);
     auto stretchScrollForceDelta = adjustedDelta;
 
     if (horizontalDeltaOpposesStretch)
         stretchScrollForceDelta.setWidth(0);
-    if (verticalDeltaOpposesStretch)
+    if (verticalDeltaOpposesStretch || isRefreshControllerPull)
         stretchScrollForceDelta.setHeight(0);
 
     m_stretchScrollForce += stretchScrollForceDelta;
@@ -620,6 +632,25 @@ bool ScrollingEffectsController::applyScrollDeltaWithStretching(const PlatformWh
 
     if (verticalDeltaOpposesStretch) {
         dampedDelta.setHeight(adjustedDelta.height());
+    } else if (isRefreshControllerPull) {
+#if HAVE(NSREFRESHCONTROLLER)
+        // Mirror AppKit's linear refresh-control pull curve up to activationHeight (with mild boost for unaccelerated trackpad deltas)
+        // instead of double-compressing through _NSElasticDeltaForReboundDelta + ceilf.
+        float currentStretchMagnitude = std::max(0.0f, -elasticDeltaForReboundDelta(m_stretchScrollForce.height()));
+        float pullDelta = std::abs(delta.height()) * 1.25f;
+        float newStretchMagnitude = 0.0f;
+        if (currentStretchMagnitude + pullDelta > activationHeight) {
+            float stretchBeyondThreshold = std::max(0.0f, currentStretchMagnitude - activationHeight);
+            float deltaConsumedLinear = std::max(0.0f, activationHeight - currentStretchMagnitude);
+            float deltaForElastic = std::max(0.0f, pullDelta - deltaConsumedLinear);
+            float currentElasticRebound = std::abs(reboundDeltaForElasticDelta(-stretchBeyondThreshold));
+            newStretchMagnitude = activationHeight + std::abs(elasticDeltaForReboundDelta(-(currentElasticRebound + deltaForElastic)));
+        } else
+            newStretchMagnitude = currentStretchMagnitude + pullDelta;
+
+        m_stretchScrollForce.setHeight(reboundDeltaForElasticDelta(-newStretchMagnitude));
+        dampedDelta.setHeight(-roundf(newStretchMagnitude) - stretchAmount.height());
+#endif
     } else if (adjustedDelta.height()) {
         const auto dampedHeight = ceilf(elasticDeltaForReboundDelta(m_stretchScrollForce.height()));
         dampedDelta.setHeight(dampedHeight - stretchAmount.height());

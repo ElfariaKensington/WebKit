@@ -1539,6 +1539,9 @@ void WebPageProxy::launchProcess(const Site& site, ProcessLaunchReason reason)
         m_legacyMainFrameProcess = processPool->processForSite(protect(websiteDataStore()), WebProcessProxy::IsolatedProcessType::MainFrame, site, site, protect(browsingContextGroup())->lockdownMode(), protect(browsingContextGroup())->enhancedSecurity(), m_configuration, processCrossOriginIsolationForBrowsingContextGroup(crossOriginMode));
 
     m_shouldReloadDueToCrashWhenVisible = false;
+#if PLATFORM(MAC)
+    m_isDiscarded = false;
+#endif
     m_isLockdownModeExplicitlySet = m_configuration->isLockdownModeExplicitlySet();
 
     Ref process = m_legacyMainFrameProcess;
@@ -3962,6 +3965,14 @@ void WebPageProxy::activityStateDidChange(OptionSet<ActivityState> mayHaveChange
 
     internals().potentiallyChangedActivityStateFlags.add(mayHaveChanged);
     m_activityStateChangeWantsSynchronousReply = m_activityStateChangeWantsSynchronousReply || replyMode == ActivityStateChangeReplyMode::Synchronous;
+
+#if PLATFORM(MAC)
+    // PageNode::GetVisibilityState: discard candidates are ordered by their last visibility change.
+    if (bool isVisible = pageClient->isMainViewVisible(); isVisible != m_wasVisibleForDiscarding) {
+        m_wasVisibleForDiscarding = isVisible;
+        m_lastVisibilityChangeTimeForDiscarding = MonotonicTime::now();
+    }
+#endif
 
     // We need to do this here instead of inside dispatchActivityStateChange() or viewIsBecomingVisible() because these don't run when the view doesn't
     // have a running WebProcess.
@@ -6772,6 +6783,9 @@ void WebPageProxy::receivedNavigationActionPolicyDecision(WebProcessProxy& proce
 
     if (frame.isMainFrame() && !isFragmentOnlyMainFrameNavigation) {
         m_shouldReloadDueToCrashWhenVisible = false;
+#if PLATFORM(MAC)
+        m_isDiscarded = false;
+#endif
         internals().subframeTerminationEvent = std::nullopt;
     }
 
@@ -10521,6 +10535,9 @@ void WebPageProxy::didCommitLoadForFrame(IPC::Connection& connection, FrameIdent
         process->didCommitMainFrameLoad(request.url());
 
         m_shouldReloadDueToCrashWhenVisible = false;
+#if PLATFORM(MAC)
+        m_isDiscarded = false;
+#endif
         internals().subframeTerminationEvent = std::nullopt;
         m_hasUpdatedRenderingAfterDidCommitLoad = false;
 #if HAVE(APPKIT_GESTURES_SUPPORT)
@@ -16667,6 +16684,16 @@ void WebPageProxy::notifyClientOfProcessTermination(ProcessTerminationReason rea
 {
     WEBPAGEPROXY_RELEASE_LOG_ERROR(Loading, "notifyClientOfProcessTermination: reason=%" PUBLIC_LOG_STRING ", scope=%" PUBLIC_LOG_STRING, processTerminationReasonToString(reason).characters(), processTerminationScopeToString(scope).characters());
 
+#if PLATFORM(MAC)
+    if (m_isDiscarded && reason == ProcessTerminationReason::RequestedByClient && scope == ProcessTerminationScope::MainFrame) {
+        // A discarded tab is not a crash: Chrome keeps its tab strip entry and reloads it from session history the next
+        // time it is shown (TabLifecycleUnit / WebContents::GetController().SetNeedsReload()).
+        WEBPAGEPROXY_RELEASE_LOG(Loading, "notifyClientOfProcessTermination: page was discarded, will reload when visible");
+        m_shouldReloadDueToCrashWhenVisible = true;
+        return;
+    }
+#endif
+
     bool handledByClient = false;
     if (m_loaderClient)
         handledByClient = reason != ProcessTerminationReason::RequestedByClient && m_loaderClient->processDidCrash(*this);
@@ -16692,6 +16719,32 @@ void WebPageProxy::notifyClientOfProcessTermination(ProcessTerminationReason rea
         }
     }
 }
+
+#if PLATFORM(MAC)
+bool WebPageProxy::discardForUrgentMemoryPressure()
+{
+    if (m_isClosed || m_isDiscarded || !hasRunningProcess() || m_provisionalPage)
+        return false;
+    // Only a WebContent process that hosts this page alone can be terminated on its behalf.
+    if (protect(preferences())->siteIsolationEnabled())
+        return false;
+    Ref process = legacyMainFrameProcess();
+    if (process->pageCount() != 1)
+        return false;
+    // DiscardEligibilityPolicy kFormInteractions / kHadUserEdits: WebContent saves changed form controls into the current
+    // session history item when the page is hidden; a POST result can not be restored without resubmitting.
+    if (RefPtr item = backForwardList().currentItem()) {
+        auto& state = item->mainFrameState();
+        if (!state.documentState().isEmpty() || state.httpBody)
+            return false;
+    }
+
+    WEBPAGEPROXY_RELEASE_LOG(Process, "discardForUrgentMemoryPressure: discarding hidden page (pid %d)", process->processID());
+    m_isDiscarded = true;
+    process->requestTermination(ProcessTerminationReason::RequestedByClient);
+    return true;
+}
+#endif
 
 void WebPageProxy::maybeReloadAfterCrashWhenVisible()
 {
@@ -16738,6 +16791,13 @@ bool WebPageProxy::hasMainFrameNavigationInFlight() const
 
 void WebPageProxy::tryReloadAfterProcessTermination()
 {
+#if PLATFORM(MAC)
+    if (std::exchange(m_isDiscarded, false)) {
+        WEBPAGEPROXY_RELEASE_LOG(Process, "tryReloadAfterProcessTermination: restoring discarded page from session history");
+        reload(ReloadOption::ExpiredOnly);
+        return;
+    }
+#endif
     internals().resetRecentCrashCountTimer.stop();
 
     bool isSubframeTermination = !!internals().subframeTerminationEvent;
@@ -19843,6 +19903,12 @@ void WebPageProxy::updatePlayingMediaDidChange(CanDelayNotification canDelayNoti
         pageClient->isPlayingAudioWillChange();
 
     internals().mediaState = newState;
+
+#if PLATFORM(MAC)
+    // kTabAudioProtectionTime counts from the moment the page stopped being audible.
+    if (playingAudioChanges && !newState.contains(MediaProducerMediaState::IsPlayingAudio))
+        m_lastAudibleTimeForDiscarding = MonotonicTime::now();
+#endif
 
     if (playingAudioChanges && pageClient)
         pageClient->isPlayingAudioDidChange();

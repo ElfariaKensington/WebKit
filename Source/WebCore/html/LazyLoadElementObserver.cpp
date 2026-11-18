@@ -96,10 +96,23 @@ void LazyLoadElementObserver::observe(Element& element)
 {
     Ref document = element.document();
     CheckedRef<LazyLoadElementObserver> observer = document->lazyLoadElementObserver();
-    RefPtr intersectionObserver = observer->intersectionObserver(document);
+    RefPtr intersectionObserver = observer->intersectionObserver(document, kindForElement(element));
     if (!intersectionObserver)
         return;
     intersectionObserver->observe(element);
+}
+
+LazyLoadElementObserver::Kind LazyLoadElementObserver::kindForElement(const Element& element)
+{
+#if PLATFORM(MAC)
+    if (is<HTMLImageElement>(element))
+        return Kind::Image;
+    if (is<HTMLIFrameElement>(element))
+        return Kind::Frame;
+#else
+    UNUSED_PARAM(element);
+#endif
+    return Kind::Other;
 }
 
 void LazyLoadElementObserver::unobserve(Element& element, Document& document)
@@ -108,6 +121,10 @@ void LazyLoadElementObserver::unobserve(Element& element, Document& document)
     if (!lazyLoadObserver)
         return;
     if (RefPtr observer = lazyLoadObserver->m_observer)
+        observer->unobserve(element);
+    if (RefPtr observer = lazyLoadObserver->m_imageObserver)
+        observer->unobserve(element);
+    if (RefPtr observer = lazyLoadObserver->m_frameObserver)
         observer->unobserve(element);
 }
 
@@ -122,16 +139,48 @@ void LazyLoadElementObserver::unobserveIfLazyLoadOnly(Element& element, Document
     unobserve(element, document);
 }
 
-IntersectionObserver* LazyLoadElementObserver::intersectionObserver(Document& document)
+IntersectionObserver* LazyLoadElementObserver::intersectionObserver(Document& document, Kind kind)
 {
-    if (!m_observer) {
+    auto createObserver = [&](const String& scrollMargin) -> RefPtr<IntersectionObserver> {
         auto callback = LazyLoadIntersectionObserverCallback::create(document);
-        static NeverDestroyed<const String> lazyLoadingScrollMarginFallback(MAKE_STATIC_STRING_IMPL("100%"));
-        IntersectionObserver::Init options { std::nullopt, { }, lazyLoadingScrollMarginFallback, { } };
+        IntersectionObserver::Init options { std::nullopt, { }, scrollMargin, { } };
         auto observer = IntersectionObserver::create(document, WTF::move(callback), WTF::move(options));
         if (observer.hasException())
             return nullptr;
-        lazyInitialize(m_observer, observer.releaseReturnValue());
+        return observer.releaseReturnValue();
+    };
+
+    switch (kind) {
+    case Kind::Image:
+        if (!m_imageObserver) {
+            // Blink settings.json5 lazyLoadingImageMarginPx4G (chromium/chromium@25cdf5d33309850b64974c2f9fc617fe925746e7).
+            static NeverDestroyed<const String> imageScrollMargin(MAKE_STATIC_STRING_IMPL("1250px"));
+            RefPtr observer = createObserver(imageScrollMargin);
+            if (!observer)
+                return nullptr;
+            lazyInitialize(m_imageObserver, observer.releaseNonNull());
+        }
+        return m_imageObserver.get();
+    case Kind::Frame:
+        if (!m_frameObserver) {
+            // Blink settings.json5 lazyLoadingFrameMarginPx4G, used as LazyLoadFrameObserver's scroll_margin.
+            static NeverDestroyed<const String> frameScrollMargin(MAKE_STATIC_STRING_IMPL("2500px"));
+            RefPtr observer = createObserver(frameScrollMargin);
+            if (!observer)
+                return nullptr;
+            lazyInitialize(m_frameObserver, observer.releaseNonNull());
+        }
+        return m_frameObserver.get();
+    case Kind::Other:
+        break;
+    }
+
+    if (!m_observer) {
+        static NeverDestroyed<const String> lazyLoadingScrollMarginFallback(MAKE_STATIC_STRING_IMPL("100%"));
+        RefPtr observer = createObserver(lazyLoadingScrollMarginFallback);
+        if (!observer)
+            return nullptr;
+        lazyInitialize(m_observer, observer.releaseNonNull());
     }
     return m_observer.get();
 }

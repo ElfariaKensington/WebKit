@@ -4283,6 +4283,11 @@ sub runSafari
     }
 
     if (isAppleMacWebKit()) {
+        # Stops SafariForWebKitDevelopment's BestAppSuggestion reconnect storm with useractivityd
+        # (see Tools/SafariDevShims/NoBestAppSuggestion.m). Not passed to XPC services.
+        my $devShims = File::Spec->catfile(productDir(), "libSafariDevShims.dylib");
+        appendToEnvironmentVariableList("DYLD_INSERT_LIBRARIES", $devShims) if -f $devShims;
+
         my $openDocumentPath;
         if (checkForArgumentAndRemoveFromARGVGettingValue("-NSOpen", \$openDocumentPath)) {
             return runMacWebKitApp(safariPath(), USE_OPEN_COMMAND, $openDocumentPath);

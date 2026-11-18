@@ -38,6 +38,7 @@
 #include <JavaScriptCore/JSStringRefCPP.h>
 #if PLATFORM(COCOA)
 #include <JavaScriptCore/JavaScriptCore.h>
+#include <WebCore/ActiveDOMObject.h>
 #else
 #include <JavaScriptCore/JavaScript.h>
 #endif
@@ -65,8 +66,14 @@ public:
     static void finalize(JSObjectRef);
 };
 
-class WebExtensionCallbackHandler : public RefCounted<WebExtensionCallbackHandler> {
+// Callback handlers pin their JS global context and functions. They are ActiveDOMObjects so they let go when their
+// document or worker stops, the way Chromium invalidates an extension ScriptContext when its frame navigates;
+// otherwise event listeners registered by content scripts keep every previous page of a tab alive.
+class WebExtensionCallbackHandler : public RefCounted<WebExtensionCallbackHandler>, public WebCore::ActiveDOMObject {
 public:
+    void ref() const final { RefCounted::ref(); }
+    void deref() const final { RefCounted::deref(); }
+
     static Ref<WebExtensionCallbackHandler> create(JSContextRef, JSObjectRef resolveFunction, JSObjectRef rejectFunction);
     static Ref<WebExtensionCallbackHandler> create(JSContextRef, JSObjectRef callbackFunction, WebExtensionAPIRuntimeBase&);
     static Ref<WebExtensionCallbackHandler> create(JSContextRef, WebExtensionAPIRuntimeBase&);
@@ -87,6 +94,11 @@ private:
     WebExtensionCallbackHandler(JSContextRef, JSObjectRef resolveFunction, JSObjectRef rejectFunction);
     WebExtensionCallbackHandler(JSContextRef, JSObjectRef callbackFunction, WebExtensionAPIRuntimeBase&);
     WebExtensionCallbackHandler(JSContextRef, WebExtensionAPIRuntimeBase&);
+
+    static Ref<WebExtensionCallbackHandler> adopt(WebExtensionCallbackHandler*);
+    // ActiveDOMObject.
+    void stop() final;
+    void releaseJSReferences();
 
     JSObjectRef m_callbackFunction = nullptr;
     JSObjectRef m_rejectFunction = nullptr;

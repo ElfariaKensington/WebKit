@@ -855,6 +855,23 @@ unsigned CachedResource::overheadSize() const
 void CachedResource::setLoadPriority(const std::optional<ResourceLoadPriority>& loadPriority, RequestPriority fetchPriority)
 {
     ResourceLoadPriority priority = loadPriority ? loadPriority.value() : DefaultResourceLoadPriority::forResourceType(type());
+#if PLATFORM(MAC)
+    // Blink AdjustPriorityWithPriorityHintAndRenderBlocking (third_party/blink/renderer/platform/loader/fetch/
+    // resource_request_utils.cc, chromium/chromium@25cdf5d33309850b64974c2f9fc617fe925746e7).
+    switch (fetchPriority) {
+    case RequestPriority::Auto:
+        break;
+    case RequestPriority::High:
+        priority = std::max(priority, ResourceLoadPriority::High);
+        break;
+    case RequestPriority::Low:
+        if (type() == Type::CSSStyleSheet && priority == ResourceLoadPriority::VeryHigh)
+            priority = ResourceLoadPriority::High;
+        else
+            priority = std::min(priority, ResourceLoadPriority::Low);
+        break;
+    }
+#else
     if (fetchPriority == RequestPriority::Low) {
         if (priority != ResourceLoadPriority::Lowest)
             --priority;
@@ -862,6 +879,7 @@ void CachedResource::setLoadPriority(const std::optional<ResourceLoadPriority>& 
         if (priority != ResourceLoadPriority::Highest)
             ++priority;
     }
+#endif
     m_loadPriority = priority;
 }
 

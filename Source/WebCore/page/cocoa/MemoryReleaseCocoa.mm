@@ -29,14 +29,11 @@
 #import "CGSubimageCacheWithTimer.h"
 #import "FontCache.h"
 #import "GarbageCollectionController.h"
-#import "GlyphDisplayListCache.h"
 #import "HTMLNameCache.h"
 #import "IOSurfacePool.h"
 #import "LocaleCocoa.h"
-#import "MemoryCache.h"
 #import <notify.h>
 #import <pal/spi/ios/GraphicsServicesSPI.h>
-#import <wtf/FastMalloc.h>
 #import <wtf/darwin/DispatchExtras.h>
 
 #if PLATFORM(IOS_FAMILY)
@@ -91,14 +88,13 @@ void jettisonExpensiveObjectsOnTopLevelNavigation()
     if (!shouldJettison)
         return;
 
-    // Throw away linked JS code and dead caches on top-level navigation/refresh.
-    // Linked code is tied to a global object and is not reusable across navigations.
+#if PLATFORM(IOS_FAMILY)
+    // Throw away linked JS code. Linked code is tied to a global object and is not reusable.
+    // The immediate memory savings outweigh the cost of recompilation in case we go back again.
     GarbageCollectionController::singleton().deleteAllLinkedCode(JSC::DeleteAllCodeIfNotCollecting);
-    MemoryCache::singleton().pruneDeadResourcesToSize(0);
-    GlyphDisplayListCache::singleton().clear();
+#endif
+
     HTMLNameCache::clear();
-    GarbageCollectionController::singleton().garbageCollectNowIfNotDoneRecently();
-    WTF::releaseFastMallocFreeMemory();
 }
 
 void registerMemoryReleaseNotifyCallbacks()

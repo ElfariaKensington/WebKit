@@ -26,6 +26,10 @@
 #import "config.h"
 #import "WebProcessPool.h"
 
+#if PLATFORM(MAC)
+#import "../mac/ChromiumPageDiscarding.h"
+#endif
+
 #import "APINavigation.h"
 #import "AccessibilityPreferences.h"
 #import "AccessibilitySupportSPI.h"
@@ -360,6 +364,37 @@ static void logProcessPoolState(const WebProcessPool& pool)
     }
 }
 
+#if PLATFORM(MAC)
+static void ignoredStartListeningForBestAppSuggestions(id, SEL) { }
+static id ignoredBestAppSuggestion(id, SEL) { return nil; }
+static id ignoredBestAppSuggestions(id, SEL, NSInteger) { return nil; }
+static BOOL ignoredFetchAllNearbyAppSuggestions(id, SEL) { return NO; }
+
+// SafariForWebKitDevelopment lacks the private lsuseractivityd.bestappsuggestion entitlement,
+// causing UserActivity's XPC interruption handler to spin in an infinite retry loop against useractivityd.
+static void disableUnsupportedBestAppSuggestionQueriesIfNeeded()
+{
+    if (![[[NSProcessInfo processInfo] processName] isEqualToString:@"SafariForWebKitDevelopment"])
+        return;
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class suggestionManagerClass = objc_getClass("UABestAppSuggestionManager");
+        if (!suggestionManagerClass)
+            return;
+
+        if (Method method = class_getInstanceMethod(suggestionManagerClass, sel_registerName("startListeningForBestAppSuggestions")))
+            method_setImplementation(method, reinterpret_cast<IMP>(ignoredStartListeningForBestAppSuggestions));
+        if (Method method = class_getInstanceMethod(suggestionManagerClass, sel_registerName("bestAppSuggestion")))
+            method_setImplementation(method, reinterpret_cast<IMP>(ignoredBestAppSuggestion));
+        if (Method method = class_getInstanceMethod(suggestionManagerClass, sel_registerName("bestAppSuggestions:")))
+            method_setImplementation(method, reinterpret_cast<IMP>(ignoredBestAppSuggestions));
+        if (Method method = class_getInstanceMethod(suggestionManagerClass, sel_registerName("fetchAllNearbyAppSuggestions")))
+            method_setImplementation(method, reinterpret_cast<IMP>(ignoredFetchAllNearbyAppSuggestions));
+    });
+}
+#endif
+
 void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization needsGlobalStaticInitialization)
 {
 #if PLATFORM(IOS_FAMILY)
@@ -407,6 +442,8 @@ void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization needsGlo
 
 #if PLATFORM(MAC)
     [WKWebInspectorPreferenceObserver sharedInstance];
+    disableUnsupportedBestAppSuggestionQueriesIfNeeded();
+    ChromiumPageDiscarding::singleton().initializeIfNeeded();
 #endif
 
     PAL::registerNotifyCallback("com.apple.WebKit.logProcessState"_s, [] {

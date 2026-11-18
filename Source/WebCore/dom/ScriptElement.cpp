@@ -380,7 +380,12 @@ bool ScriptElement::requestClassicScript(const String& sourceURL)
     Ref document = element->document();
     if (!sourceURL.isEmpty()) {
         auto script = LoadableClassicScript::create(element->nonce(), element->attributeWithoutSynchronization(HTMLNames::integrityAttr), referrerPolicy(), fetchPriority(),
+#if PLATFORM(MAC)
+            // Blink ScriptLoader fetches both async and defer classic scripts with FetchParameters::kLazyLoad.
+            element->attributeWithoutSynchronization(HTMLNames::crossoriginAttr), scriptCharset(), element->localName(), element->isInUserAgentShadowTree(), hasAsyncAttribute() || hasDeferAttribute());
+#else
             element->attributeWithoutSynchronization(HTMLNames::crossoriginAttr), scriptCharset(), element->localName(), element->isInUserAgentShadowTree(), hasAsyncAttribute());
+#endif
 
         auto scriptURL = document->encodingParseURL(sourceURL);
         document->willLoadScriptElement(scriptURL);

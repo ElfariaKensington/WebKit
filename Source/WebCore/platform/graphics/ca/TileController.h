@@ -35,11 +35,13 @@
 #include <WebCore/Timer.h>
 #include <WebCore/VelocityData.h>
 #include <wtf/Deque.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/Platform.h>
 #include <wtf/RetainPtr.h>
 #include <wtf/Seconds.h>
 #include <wtf/TZoneMalloc.h>
+#include <wtf/Vector.h>
 
 #if ENABLE(RE_DYNAMIC_CONTENT_SCALING)
 #include <WebCore/DynamicContentScalingDisplayList.h>
@@ -227,6 +229,22 @@ private:
 #endif
 
     FloatRect adjustTileCoverageWithScrollingVelocity(const FloatRect& coverageRect, const FloatSize& newSize, const FloatRect& visibleRect, float contentsScale, MonotonicTime timestamp) const;
+
+#if PLATFORM(MAC)
+public:
+    // cc::PictureLayerTilingSet's EVENTUALLY rect: rastered tiles inside it are kept even when they leave the
+    // raster (coverage) rect, as long as the process stays within cc's tile memory budget.
+    FloatRect chromiumRetainRect() const { return m_chromiumRetainRect; }
+    static size_t chromiumTileMemoryBudget(float deviceScaleFactor);
+private:
+    FloatRect computeChromiumTileCoverage(const FloatRect& coverageRect, const FloatSize& newSize, const FloatRect& visibleRect, float contentsScale);
+    struct ChromiumFrameVisibleRect {
+        FloatRect visibleRect;
+        MonotonicTime frameTime;
+    };
+    Vector<ChromiumFrameVisibleRect, 2> m_chromiumVisibleRectHistory; // PictureLayerTilingSet::visible_rect_history_
+    FloatRect m_chromiumRetainRect;
+#endif
 
     IntRect boundsForSize(const FloatSize&) const;
 

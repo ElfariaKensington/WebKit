@@ -658,6 +658,7 @@ UIProcess/mac/WebColorPickerMac.mm @nonARC
 UIProcess/mac/WebContextMenuProxyMac.mm @nonARC
 UIProcess/mac/WebDataListSuggestionsDropdownMac.mm @nonARC
 UIProcess/mac/WebDateTimePickerMac.mm @nonARC
+UIProcess/mac/ChromiumPageDiscarding.mm
 UIProcess/mac/WebPageProxyMac.mm @nonARC
 UIProcess/mac/WebPopupMenuProxyMac.mm @nonARC
 UIProcess/mac/WebProcessProxyMac.mm @nonARC

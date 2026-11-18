@@ -246,7 +246,6 @@
 #include <WebCore/FrameInspectorController.h>
 #include <WebCore/FrameLoadRequest.h>
 #include <WebCore/FrameLoaderTypes.h>
-#include <WebCore/GarbageCollectionController.h>
 #include <WebCore/GeometryUtilities.h>
 #include <WebCore/HTMLAttachmentElement.h>
 #include <WebCore/HTMLBodyElement.h>
@@ -288,7 +287,6 @@
 #include <WebCore/MIMETypeRegistry.h>
 #include <WebCore/MediaDocument.h>
 #include <WebCore/MediaPlayer.h>
-#include <WebCore/MemoryRelease.h>
 #include <WebCore/MouseEvent.h>
 #include <WebCore/NativeImage.h>
 #include <WebCore/NavigationScheduler.h>
@@ -5164,24 +5162,22 @@ void WebPage::updateIsInWindow(bool isInitialState)
 void WebPage::visibilityDidChange()
 {
     bool isVisible = m_activityState.contains(ActivityState::IsVisible);
-    if (!isVisible) {
-        if (m_page) {
-            // We save the document / scroll state when backgrounding a tab so that we are able to restore it
-            // if it gets terminated while in the background.
-            // FIXME: A frame in another process keeps the identifier of the back/forward item it was added to, so its state
-            // is saved into that item rather than the current one once another frame adds an item.
-            for (Ref frame : copyToVectorOf<Ref<LocalFrame>>(m_page->rootFrames()))
-                frame->loader().history().saveDocumentAndScrollState();
-        }
-#if PLATFORM(MAC)
-        markLayersVolatile();
-        WebCore::releaseMemory(Critical::No, Synchronous::Yes, WebCore::MaintainBackForwardCache::Yes, WebCore::MaintainMemoryCache::Yes);
-        WebCore::GarbageCollectionController::singleton().garbageCollectSoon();
-#endif
+    if (!isVisible && m_page) {
+        // We save the document / scroll state when backgrounding a tab so that we are able to restore it
+        // if it gets terminated while in the background.
+        // FIXME: A frame in another process keeps the identifier of the back/forward item it was added to, so its state
+        // is saved into that item rather than the current one once another frame adds an item.
+        for (Ref frame : copyToVectorOf<Ref<LocalFrame>>(m_page->rootFrames()))
+            frame->loader().history().saveDocumentAndScrollState();
     }
 #if PLATFORM(MAC)
-    else
+    // cc::LayerTreeHostImpl::SetVisible: a hidden compositor's tile memory limit drops to zero, so all tiles are
+    // released; becoming visible again requires high-res tiles before drawing.
+    if (isVisible)
         cancelMarkLayersVolatile();
+    else
+        markLayersVolatile();
+    WebProcess::singleton().updateRendererBackgrounded();
 #endif
 }
 
@@ -8819,6 +8815,10 @@ static void setUseDynamicViewportUnitsAsDefaultIfNeeded(LocalFrame* frame)
 
 void WebPage::didCommitLoad(WebFrame* frame)
 {
+#if PLATFORM(MAC)
+    if (frame->isMainFrame())
+        WebProcess::singleton().mainFrameContextWillBeDisposed();
+#endif
 #if ENABLE(UI_SIDE_COMPOSITING)
     // Lets updateVisibleContentRects() throw away visible rect updates the UI process queued before this
     // navigation. With UI-side compositing off at runtime there are no transactions, but there are no visible

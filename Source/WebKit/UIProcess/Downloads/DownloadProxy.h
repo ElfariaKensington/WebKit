@@ -145,6 +145,12 @@ private:
 #if HAVE(MODERN_DOWNLOADPROGRESS)
     static Vector<uint8_t> bookmarkDataForURL(const URL&);
 #endif
+#if PLATFORM(MAC)
+    static bool shouldUseFallbackDownloadsFolder();
+    static String fallbackDownloadDestinationPath(const String& suggestedFilename);
+    std::optional<String> fallbackDestinationIfNeeded();
+#endif
+    void completeDestinationDecision(AllowOverwrite, const String& destination);
 
     WeakPtr<DownloadProxyMap> m_downloadProxyMap;
     RefPtr<WebsiteDataStore> m_dataStore;
@@ -155,6 +161,11 @@ private:
     WebCore::ResourceRequest m_request;
     String m_suggestedFilename;
     String m_destinationFilename;
+    DecideDestinationCallback m_pendingDestinationCallback;
+#if PLATFORM(MAC)
+    String m_pendingFallbackSuggestedFilename;
+    bool m_usingFallbackDownloadsFolder { false };
+#endif
 
     WeakPtr<WebPageProxy> m_originatingPage;
     Vector<URL> m_redirectChain;

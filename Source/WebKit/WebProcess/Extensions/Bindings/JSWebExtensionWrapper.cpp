@@ -42,28 +42,64 @@
 #include <JavaScriptCore/JSStringRefCPP.h>
 #include <JavaScriptCore/JSWeakObjectMapRefPrivate.h>
 #include <WebCore/JSDOMExceptionHandling.h>
+#include <WebCore/ContextDestructionObserverInlines.h>
 #include <WebCore/JSDOMGlobalObject.h>
 #include <WebCore/SerializedScriptValue.h>
 
 namespace WebKit {
 
+static WebCore::ScriptExecutionContext* scriptExecutionContextForContext(JSContextRef context)
+{
+    if (!context)
+        return nullptr;
+    auto* globalObject = dynamicDowncast<WebCore::JSDOMGlobalObject>(toJS(JSContextGetGlobalContext(context)));
+    return globalObject ? globalObject->scriptExecutionContext() : nullptr;
+}
+
+Ref<WebExtensionCallbackHandler> WebExtensionCallbackHandler::adopt(WebExtensionCallbackHandler* handler)
+{
+    Ref protectedHandler = adoptRef(*handler);
+    protectedHandler->suspendIfNeeded();
+    // A handler created for a context that already stopped would never get stop().
+    if (!protectedHandler->scriptExecutionContext() || protectedHandler->isContextStopped())
+        protectedHandler->releaseJSReferences();
+    return protectedHandler;
+}
+
+void WebExtensionCallbackHandler::stop()
+{
+    releaseJSReferences();
+}
+
+void WebExtensionCallbackHandler::releaseJSReferences()
+{
+    if (!m_globalContext)
+        return;
+    if (m_callbackFunction)
+        JSValueUnprotect(m_globalContext.get(), std::exchange(m_callbackFunction, nullptr));
+    if (m_rejectFunction)
+        JSValueUnprotect(m_globalContext.get(), std::exchange(m_rejectFunction, nullptr));
+    m_globalContext = nullptr;
+}
+
 Ref<WebExtensionCallbackHandler> WebExtensionCallbackHandler::create(JSContextRef context, JSObjectRef resolveFunction, JSObjectRef rejectFunction)
 {
-    return adoptRef(*new WebExtensionCallbackHandler(context, resolveFunction, rejectFunction));
+    return adopt(new WebExtensionCallbackHandler(context, resolveFunction, rejectFunction));
 }
 
 Ref<WebExtensionCallbackHandler> WebExtensionCallbackHandler::create(JSContextRef context, JSObjectRef callbackFunction, WebExtensionAPIRuntimeBase& runtime)
 {
-    return adoptRef(*new WebExtensionCallbackHandler(context, callbackFunction, runtime));
+    return adopt(new WebExtensionCallbackHandler(context, callbackFunction, runtime));
 }
 
 Ref<WebExtensionCallbackHandler> WebExtensionCallbackHandler::create(JSContextRef context, WebExtensionAPIRuntimeBase& runtime)
 {
-    return adoptRef(*new WebExtensionCallbackHandler(context, runtime));
+    return adopt(new WebExtensionCallbackHandler(context, runtime));
 }
 
 WebExtensionCallbackHandler::WebExtensionCallbackHandler(JSContextRef context, JSObjectRef callbackFunction, WebExtensionAPIRuntimeBase& runtime)
-    : m_callbackFunction(callbackFunction)
+    : ActiveDOMObject(scriptExecutionContextForContext(context))
+    , m_callbackFunction(callbackFunction)
     , m_globalContext(JSContextGetGlobalContext(context))
     , m_runtime(&runtime)
 {
@@ -74,14 +110,16 @@ WebExtensionCallbackHandler::WebExtensionCallbackHandler(JSContextRef context, J
 }
 
 WebExtensionCallbackHandler::WebExtensionCallbackHandler(JSContextRef context, WebExtensionAPIRuntimeBase& runtime)
-    : m_globalContext(JSContextGetGlobalContext(context))
+    : ActiveDOMObject(scriptExecutionContextForContext(context))
+    , m_globalContext(JSContextGetGlobalContext(context))
     , m_runtime(&runtime)
 {
     ASSERT(context);
 }
 
 WebExtensionCallbackHandler::WebExtensionCallbackHandler(JSContextRef context, JSObjectRef resolveFunction, JSObjectRef rejectFunction)
-    : m_callbackFunction(resolveFunction)
+    : ActiveDOMObject(scriptExecutionContextForContext(context))
+    , m_callbackFunction(resolveFunction)
     , m_rejectFunction(rejectFunction)
     , m_globalContext(JSContextGetGlobalContext(context))
 {
@@ -95,11 +133,7 @@ WebExtensionCallbackHandler::WebExtensionCallbackHandler(JSContextRef context, J
 
 WebExtensionCallbackHandler::~WebExtensionCallbackHandler()
 {
-    if (m_callbackFunction)
-        JSValueUnprotect(m_globalContext.get(), m_callbackFunction);
-
-    if (m_rejectFunction)
-        JSValueUnprotect(m_globalContext.get(), m_rejectFunction);
+    releaseJSReferences();
 }
 
 JSValueRef WebExtensionCallbackHandler::callbackFunction() const

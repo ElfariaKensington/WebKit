@@ -2318,6 +2318,13 @@ public:
     void didEndViewGesture();
 
     NODELETE bool isPlayingAudio() const;
+#if PLATFORM(MAC)
+    // Chrome's urgent page discarding (ChromiumPageDiscarding.mm).
+    MonotonicTime lastVisibilityChangeTimeForDiscarding() const { return m_lastVisibilityChangeTimeForDiscarding; }
+    MonotonicTime lastAudibleTimeForDiscarding() const { return m_lastAudibleTimeForDiscarding; }
+    bool isDiscarded() const { return m_isDiscarded; }
+    bool discardForUrgentMemoryPressure();
+#endif
     NODELETE bool hasMediaStreaming() const;
     NODELETE bool hasProtectedMedia() const;
 
@@ -4459,6 +4466,12 @@ private:
 
     bool m_mainFramePluginHandlesPageScaleGesture { false };
     bool m_shouldReloadDueToCrashWhenVisible { false };
+#if PLATFORM(MAC)
+    bool m_isDiscarded { false };
+    bool m_wasVisibleForDiscarding { false };
+    MonotonicTime m_lastVisibilityChangeTimeForDiscarding { MonotonicTime::now() };
+    MonotonicTime m_lastAudibleTimeForDiscarding;
+#endif
 
     unsigned m_pageCount { 0 };
 

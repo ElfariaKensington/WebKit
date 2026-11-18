@@ -2068,11 +2068,13 @@ void Document::addVisualUpdatePreventedReason(VisualUpdatesPreventedReason reaso
         m_visualUpdatesAllowedChangeCompletesPageTransition = true;
 
     if (!m_visualUpdatesSuppressionTimer.isActive() && visualUpdatePreventReasonsClearedByTimer().contains(reason)) {
-        double timeoutSeconds = settings().incrementalRenderingSuppressionTimeoutInSeconds();
-#if !PLATFORM(IOS_FAMILY)
-        timeoutSeconds = std::min(timeoutSeconds, 1.25);
+#if PLATFORM(MAC)
+        // Blink paint holding: LocalFrameView defers commits until first contentful paint for at most
+        // kCommitDelayDefaultInMs (500 ms, chromium/chromium@25cdf5d33309850b64974c2f9fc617fe925746e7).
+        m_visualUpdatesSuppressionTimer.startOneShot(std::min(1_s * settings().incrementalRenderingSuppressionTimeoutInSeconds(), 500_ms));
+#else
+        m_visualUpdatesSuppressionTimer.startOneShot(1_s * settings().incrementalRenderingSuppressionTimeoutInSeconds());
 #endif
-        m_visualUpdatesSuppressionTimer.startOneShot(1_s * timeoutSeconds);
     }
 }
 

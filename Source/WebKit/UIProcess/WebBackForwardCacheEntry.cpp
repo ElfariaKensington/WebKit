@@ -40,7 +40,12 @@
 
 namespace WebKit {
 
+#if PLATFORM(MAC)
+// Capped below Chromium's kDefaultTimeToLiveInBackForwardCacheInSeconds (600 s) at the user's request.
+static const Seconds expirationDelay { 300_s };
+#else
 static const Seconds expirationDelay { 30_min };
+#endif
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(WebBackForwardCacheEntry);
 

@@ -32,7 +32,12 @@ namespace WebCore {
 struct DefaultResourceLoadPriority {
     NODELETE static ResourceLoadPriority forResourceType(CachedResource::Type);
 
+#if PLATFORM(MAC)
+    // Blink ResourceFetcher::ComputeLoadPriority: classic scripts with FetchParameters::kLazyLoad (async/defer) load at kLow.
+    static constexpr auto asyncScript = ResourceLoadPriority::Low;
+#else
     static constexpr auto asyncScript = ResourceLoadPriority::Medium;
+#endif
     static constexpr auto inactiveStyleSheet = ResourceLoadPriority::VeryLow;
 };
 

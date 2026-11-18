@@ -93,6 +93,9 @@
 #include "WebProcessDataStoreParameters.h"
 #include "WebProcessMessages.h"
 #include "WebProcessProxyMessages.h"
+#if PLATFORM(MAC)
+#include "ChromiumMemoryPolicy.h"
+#endif
 #include "WebResourceLoadObserver.h"
 #include "WebSWClientConnection.h"
 #include "WebSWContextManagerConnection.h"
@@ -590,6 +593,10 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
         });
 #endif
         memoryPressureHandler.setMemoryPressureStatusChangedCallback([this, protectedThis = Ref { *this }]() {
+#if PLATFORM(MAC)
+            // v8::Isolate::MemoryPressureNotification: critical system pressure makes V8 grow the heap conservatively.
+            JSC::setHeapHighMemoryPressure(MemoryPressureHandler::singleton().memoryPressureStatus() == SystemMemoryPressureStatus::Critical);
+#endif
             if (RefPtr parentProcessConnection = this->parentProcessConnection())
                 parentProcessConnection->send(Messages::WebProcessProxy::MemoryPressureStatusChanged(MemoryPressureHandler::singleton().memoryPressureStatus()), 0);
         });
@@ -1128,6 +1135,11 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
 #if OS(LINUX)
         HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
 #endif
+#if PLATFORM(MAC)
+        ensureChromiumMemoryPolicy();
+        m_memoryPurgeManager->onPageCreated();
+        updateRendererBackgrounded();
+#endif
     } else
         page->reinitializeWebPage(WTF::move(parameters));
 
@@ -1153,6 +1165,12 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
 
     pageWillLeaveWindow(pageID);
     m_pageMap.remove(pageID);
+#if PLATFORM(MAC)
+    if (m_memoryPurgeManager) {
+        m_memoryPurgeManager->onPageDestroyed();
+        updateRendererBackgrounded();
+    }
+#endif
 
     enableTermination();
     updateCPULimit();
@@ -2075,6 +2093,15 @@ void WebProcess::pageWillLeaveWindow(PageIdentifier pageID)
 {
     m_pagesInWindows.remove(pageID);
 
+#if PLATFORM(MAC)
+    // WebKit's fixed 10 s / 120 s non-visible cleanup timers are superseded by the Chromium policies driven from
+    // updateRendererBackgrounded(): cc frees decoded images as soon as the page is hidden, and Blink's
+    // MemoryPurgeManager purges 1-4 minutes after the renderer is backgrounded.
+    UNUSED_VARIABLE(nonVisibleProcessEarlyMemoryCleanupDelay);
+#if ENABLE(NON_VISIBLE_WEBPROCESS_MEMORY_CLEANUP_TIMER)
+    UNUSED_VARIABLE(nonVisibleProcessMemoryCleanupDelay);
+#endif
+#else
     if (m_pagesInWindows.isEmpty()) {
         if (!m_nonVisibleProcessEarlyMemoryCleanupTimer)
             m_nonVisibleProcessEarlyMemoryCleanupTimer.emplace(*this, &WebProcess::nonVisibleProcessEarlyMemoryCleanupTimerFired, nonVisibleProcessEarlyMemoryCleanupDelay);
@@ -2085,6 +2112,7 @@ void WebProcess::pageWillLeaveWindow(PageIdentifier pageID)
             m_nonVisibleProcessMemoryCleanupTimer.startOneShot(nonVisibleProcessMemoryCleanupDelay);
 #endif
     }
+#endif
 }
 
 bool WebProcess::isProcessBeingCachedForPerformance()
@@ -2319,6 +2347,53 @@ void WebProcess::prefetchDNS(const String& hostname)
     // some time of no DNS requests.
     m_dnsPrefetchHystereris.impulse();
 }
+
+#if PLATFORM(MAC)
+void WebProcess::ensureChromiumMemoryPolicy()
+{
+    if (m_memoryPurgeManager)
+        return;
+    m_v8MemoryReducer = V8MemoryReducer::create(commonVM());
+    m_memoryPurgeManager = makeUnique<BlinkMemoryPurgeManager>([] {
+        // MemoryPurgeManager::PerformMemoryPurge sets the renderer's memory pressure level to critical, which
+        // runs the same handlers as a system critical-pressure notification.
+        MemoryPressureHandler::singleton().releaseMemory(Critical::Yes, Synchronous::Yes);
+    });
+}
+
+void WebProcess::updateRendererBackgrounded()
+{
+    if (!m_memoryPurgeManager)
+        return;
+    bool backgrounded = !hasVisibleWebPage();
+    if (backgrounded == m_rendererIsBackgrounded)
+        return;
+    m_rendererIsBackgrounded = backgrounded;
+
+    // MainThreadSchedulerImpl::SetRendererBackgrounded -> v8::Isolate::SetPriority(kBestEffort / kUserBlocking).
+    JSC::setHeapIsBackgrounded(backgrounded);
+    if (backgrounded && !isProcessBeingCachedForPerformance()) {
+        // cc::LayerTreeHostImpl::UpdateTileManagerMemoryPolicy: a hidden compositor gets a zero tile budget and
+        // tells its image decode cache to free resources aggressively.
+        for (auto& page : m_pageMap.values())
+            page->willDestroyDecodedDataForAllImages();
+        MemoryCache::singleton().destroyDecodedDataForAllImages();
+        // Heap::ActivateMemoryReducerIfNeeded on switching the isolate to the background.
+        m_v8MemoryReducer->activateIfNeeded();
+    }
+    m_memoryPurgeManager->setRendererBackgrounded(backgrounded);
+}
+
+void WebProcess::mainFrameContextWillBeDisposed()
+{
+    // V8GCForContextDispose::NotifyContextDisposed -> v8::Isolate::ContextDisposedNotification(kNoDependants)
+    // -> Heap::NotifyContextDisposed: reset the allocation limit and notify the memory reducer.
+    if (!m_v8MemoryReducer)
+        return;
+    JSC::notifyHeapContextDisposed(commonVM());
+    m_v8MemoryReducer->notifyPossibleGarbage();
+}
+#endif
 
 bool WebProcess::hasVisibleWebPage() const
 {

@@ -59,7 +59,7 @@ pas_scavenger_state pas_scavenger_current_state = pas_scavenger_state_no_thread;
 unsigned pas_scavenger_should_suspend_count = 0;
 pas_scavenger_data* pas_scavenger_data_instance = NULL;
 
-double pas_scavenger_deep_sleep_timeout_in_milliseconds = 4. * 1000.;
+double pas_scavenger_deep_sleep_timeout_in_milliseconds = 10. * 1000.;
 #ifdef PAS_LIBMALLOC
 double pas_scavenger_period_in_milliseconds = 10.;
 uint64_t pas_scavenger_max_epoch_delta = 10ll * 1000ll * 1000ll;
@@ -70,7 +70,7 @@ double pas_scavenger_period_in_milliseconds = 125.;
 double pas_scavenger_period_in_milliseconds = 100.;
 #endif
 #if PAS_PLATFORM(MAC)
-uint64_t pas_scavenger_max_epoch_delta = 200ll * 1000ll * 1000ll;
+uint64_t pas_scavenger_max_epoch_delta = 600ll * 1000ll * 1000ll;
 #else
 uint64_t pas_scavenger_max_epoch_delta = 300ll * 1000ll * 1000ll;
 #endif
@@ -78,7 +78,7 @@ uint64_t pas_scavenger_max_epoch_delta = 300ll * 1000ll * 1000ll;
 
 static uint32_t pas_scavenger_tick_count = 0;
 /* Run thread-local-cache decommit once a N. It should be power of two. */
-#define PAS_THREAD_LOCAL_CACHE_DECOMMIT_PERIOD_COUNT 32 /* Roughly speaking, it runs once per 3.2 seconds. */
+#define PAS_THREAD_LOCAL_CACHE_DECOMMIT_PERIOD_COUNT 128 /* Roughly speaking, it runs once per 13 seconds. */
 
 #if PAS_OS(DARWIN)
 static _Atomic qos_class_t pas_scavenger_requested_qos_class = QOS_CLASS_USER_INITIATED;

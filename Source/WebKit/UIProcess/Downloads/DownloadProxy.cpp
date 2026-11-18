@@ -74,6 +74,8 @@ DownloadProxy::~DownloadProxy()
 {
     if (m_didStartCallback)
         m_didStartCallback(nullptr);
+    if (m_pendingDestinationCallback)
+        m_pendingDestinationCallback({ }, { }, AllowOverwrite::No, UseDownloadPlaceholder::No, { }, { }, { }, { });
 }
 
 static RefPtr<API::Data> createData(std::span<const uint8_t> data)
@@ -85,6 +87,22 @@ static RefPtr<API::Data> createData(std::span<const uint8_t> data)
 
 void DownloadProxy::cancel(CompletionHandler<void(API::Data*)>&& completionHandler)
 {
+#if PLATFORM(MAC)
+    if (m_pendingDestinationCallback && shouldUseFallbackDownloadsFolder()) {
+        if (auto fallbackDestination = fallbackDestinationIfNeeded()) {
+            completeDestinationDecision(AllowOverwrite::No, *fallbackDestination);
+            completionHandler(nullptr);
+            setClient(adoptRef(*new API::DownloadClient));
+            return;
+        }
+    }
+    if (m_usingFallbackDownloadsFolder) {
+        completionHandler(nullptr);
+        setClient(adoptRef(*new API::DownloadClient));
+        return;
+    }
+#endif
+
     m_downloadIsCancelled = true;
     if (m_dataStore) {
         protect(protect(m_dataStore)->networkProcess())->sendWithAsyncReply(Messages::NetworkProcess::CancelDownload(m_downloadID), [weakThis = WeakPtr { *this }, completionHandler = WTF::move(completionHandler)] (std::span<const uint8_t> resumeData) mutable {
@@ -184,29 +202,65 @@ void DownloadProxy::decideDestinationWithSuggestedFilename(const WebCore::Resour
     else
         suggestedFilename = MIMETypeRegistry::appendFileExtensionIfNecessary(suggestedFilename, response.mimeType());
 
-    protect(client())->decideDestinationWithSuggestedFilename(*this, response, ResourceResponseBase::sanitizeSuggestedFilename(suggestedFilename), [this, protectedThis = Ref { *this }, completionHandler = WTF::move(completionHandler)] (AllowOverwrite allowOverwrite, String destination) mutable {
-        SandboxExtension::Handle sandboxExtensionHandle;
-        if (!destination.isNull()) {
-            if (auto handle = SandboxExtension::createHandle(destination, SandboxExtension::Type::ReadWrite))
-                sandboxExtensionHandle = WTF::move(*handle);
-        }
-
-        setDestinationFilename(destination);
-
-        protect(client())->decidePlaceholderPolicy(*this, [completionHandler = WTF::move(completionHandler), destination = WTF::move(destination), sandboxExtensionHandle = WTF::move(sandboxExtensionHandle), allowOverwrite] (WebKit::UseDownloadPlaceholder usePlaceholder, const URL& url) mutable {
-
-            SandboxExtension::Handle placeHolderSandboxExtensionHandle;
-            Vector<uint8_t> bookmarkData;
-            Vector<uint8_t> activityTokenData;
-#if HAVE(MODERN_DOWNLOADPROGRESS)
-            bookmarkData = bookmarkDataForURL(url);
-            activityTokenData = activityAccessToken();
-#else
-            if (auto handle = SandboxExtension::createHandle(url.fileSystemPath(), SandboxExtension::Type::ReadWrite))
-                placeHolderSandboxExtensionHandle = WTF::move(*handle);
+    auto sanitizedFilename = ResourceResponseBase::sanitizeSuggestedFilename(suggestedFilename);
+    m_pendingDestinationCallback = WTF::move(completionHandler);
+#if PLATFORM(MAC)
+    m_pendingFallbackSuggestedFilename = sanitizedFilename;
 #endif
-            completionHandler(destination, WTF::move(sandboxExtensionHandle), allowOverwrite, usePlaceholder, url, WTF::move(placeHolderSandboxExtensionHandle), borrow(bookmarkData)->span(), borrow(activityTokenData)->span());
-        });
+
+    protect(client())->decideDestinationWithSuggestedFilename(*this, response, sanitizedFilename, [this, protectedThis = Ref { *this }] (AllowOverwrite allowOverwrite, String destination) mutable {
+        if (!m_pendingDestinationCallback)
+            return;
+
+#if PLATFORM(MAC)
+        if (destination.isEmpty()) {
+            if (auto fallbackDestination = fallbackDestinationIfNeeded()) {
+                completeDestinationDecision(AllowOverwrite::No, *fallbackDestination);
+                setClient(adoptRef(*new API::DownloadClient));
+                return;
+            }
+        }
+#endif
+
+        completeDestinationDecision(allowOverwrite, destination);
+    });
+}
+
+void DownloadProxy::completeDestinationDecision(AllowOverwrite allowOverwrite, const String& destination)
+{
+    auto completionHandler = std::exchange(m_pendingDestinationCallback, { });
+    if (!completionHandler)
+        return;
+
+    SandboxExtension::Handle sandboxExtensionHandle;
+    if (!destination.isNull()) {
+        if (auto handle = SandboxExtension::createHandle(destination, SandboxExtension::Type::ReadWrite))
+            sandboxExtensionHandle = WTF::move(*handle);
+    }
+
+    setDestinationFilename(destination);
+
+    protect(client())->decidePlaceholderPolicy(*this, [this, protectedThis = Ref { *this }, completionHandler = WTF::move(completionHandler), destination, sandboxExtensionHandle = WTF::move(sandboxExtensionHandle), allowOverwrite] (WebKit::UseDownloadPlaceholder usePlaceholder, const URL& url) mutable {
+
+        URL publishURL = url;
+#if PLATFORM(MAC) && !HAVE(MODERN_DOWNLOADPROGRESS)
+        if (m_usingFallbackDownloadsFolder && usePlaceholder == WebKit::UseDownloadPlaceholder::No && publishURL.isEmpty() && !destination.isEmpty())
+            publishURL = URL::fileURLWithFileSystemPath(destination);
+#endif
+
+        SandboxExtension::Handle placeHolderSandboxExtensionHandle;
+        Vector<uint8_t> bookmarkData;
+        Vector<uint8_t> activityTokenData;
+#if HAVE(MODERN_DOWNLOADPROGRESS)
+        bookmarkData = bookmarkDataForURL(publishURL);
+        activityTokenData = activityAccessToken();
+#else
+        if (!publishURL.isEmpty()) {
+            if (auto handle = SandboxExtension::createHandle(publishURL.fileSystemPath(), SandboxExtension::Type::ReadWrite))
+                placeHolderSandboxExtensionHandle = WTF::move(*handle);
+        }
+#endif
+        completionHandler(destination, WTF::move(sandboxExtensionHandle), allowOverwrite, usePlaceholder, publishURL, WTF::move(placeHolderSandboxExtensionHandle), borrow(bookmarkData)->span(), borrow(activityTokenData)->span());
     });
 }
 

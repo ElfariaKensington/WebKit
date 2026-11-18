@@ -180,7 +180,11 @@ static void releaseCriticalMemory(Synchronous synchronous, MaintainBackForwardCa
     if (synchronous == Synchronous::Yes) {
         GarbageCollectionController::singleton().garbageCollectNow();
     } else {
+#if PLATFORM(IOS_FAMILY)
         GarbageCollectionController::singleton().garbageCollectNowIfNotDoneRecently();
+#else
+        GarbageCollectionController::singleton().garbageCollectSoon();
+#endif
     }
 
     WorkerGlobalScope::releaseMemoryInWorkers(synchronous);
@@ -190,8 +194,10 @@ void releaseMemory(Critical critical, Synchronous synchronous, MaintainBackForwa
 {
     TraceScope scope(MemoryPressureHandlerStart, MemoryPressureHandlerEnd, static_cast<uint64_t>(critical), static_cast<uint64_t>(synchronous));
 
+#if PLATFORM(IOS_FAMILY)
     if (critical == Critical::No)
         GarbageCollectionController::singleton().garbageCollectNowIfNotDoneRecently();
+#endif
 
     if (critical == Critical::Yes) {
         // Return unused pages back to the OS now as this will likely give us a little memory to work with.
@@ -203,14 +209,14 @@ void releaseMemory(Critical critical, Synchronous synchronous, MaintainBackForwa
 
     platformReleaseMemory(critical);
 
-    if (synchronous == Synchronous::Yes || critical == Critical::Yes) {
+    if (synchronous == Synchronous::Yes) {
         // FastMalloc has lock-free thread specific caches that can only be cleared from the thread itself.
         WorkerOrWorkletThread::releaseFastMallocFreeMemoryInAllThreads();
 #if ENABLE(SCROLLING_THREAD)
         ScrollingThread::dispatch(WTF::releaseFastMallocFreeMemory);
 #endif
+        WTF::releaseFastMallocFreeMemory();
     }
-    WTF::releaseFastMallocFreeMemory();
 
 #if ENABLE(RESOURCE_USAGE)
     Page::forEachPage([&](Page& page) {

@@ -86,32 +86,52 @@ void calculateMemoryCacheSizes(CacheModel cacheModel, unsigned& cacheTotalCapaci
         break;
     }
     case CacheModel::PrimaryWebBrowser: {
-        // Keep only the immediately previous page in BackForwardCache (preserves instant 1-step Back swipe
-        // while avoiding hoarding multiple heavyweight SPA pages across navigations).
+        // back/forward cache capacity (in pages)
+#if PLATFORM(MAC)
+        // Capped below Chromium's 6 pages at the user's request: keep only the previous page for an instant Back.
         if (memorySize >= 512)
+            backForwardCacheCapacity = 1;
+#else
+        if (memorySize >= 512)
+            backForwardCacheCapacity = 2;
+#endif
+        else if (memorySize >= 256)
             backForwardCacheCapacity = 1;
         else
             backForwardCacheCapacity = 0;
 
         // Object cache capacities (in bytes)
+        // (Testing indicates that value / MB depends heavily on content and
+        // browsing pattern. Even growth above 128MB can have substantial
+        // value / MB for some content / browsing patterns.)
         if (memorySize >= 2048)
             cacheTotalCapacity = 128 * MB;
-        else if (memorySize >= 1024)
+        else if (memorySize >= 1536)
             cacheTotalCapacity = 96 * MB;
+        else if (memorySize >= 1024)
+            cacheTotalCapacity = 64 * MB;
         else if (memorySize >= 512)
             cacheTotalCapacity = 32 * MB;
         else
             cacheTotalCapacity = 16 * MB;
 
-        cacheMinDeadCapacity = cacheTotalCapacity / 8;
-        cacheMaxDeadCapacity = cacheTotalCapacity / 4;
+        cacheMinDeadCapacity = cacheTotalCapacity / 4;
+        cacheMaxDeadCapacity = cacheTotalCapacity / 2;
 
         // This code is here to avoid a PLT regression. We can remove it if we
         // can prove that the overall system gain would justify the regression.
         cacheMaxDeadCapacity = std::max(24u, cacheMaxDeadCapacity);
 
-        deadDecodedDataDeletionInterval = 45_s;
+        deadDecodedDataDeletionInterval = 60_s;
 
+#if PLATFORM(MAC)
+        // Capped below both WebKit's defaults and Blink's 200 MB strong-reference cache at the user's request:
+        // unreferenced resources are kept only briefly, and decoded image data of unreferenced images goes quickly.
+        cacheTotalCapacity = std::min<unsigned>(cacheTotalCapacity, 48 * MB);
+        cacheMinDeadCapacity = 0;
+        cacheMaxDeadCapacity = 8 * MB;
+        deadDecodedDataDeletionInterval = 30_s;
+#endif
         break;
     }
     default:

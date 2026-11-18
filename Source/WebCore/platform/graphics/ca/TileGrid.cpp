@@ -35,7 +35,9 @@
 #include "PlatformCALayer.h"
 #include "TileController.h"
 #include "TransformationMatrix.h"
+#include <wtf/HashSet.h>
 #include <wtf/MainThread.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/TextStream.h>
@@ -61,6 +63,31 @@ static TextStream& operator<<(TextStream& ts, TileGrid::ValidationPolicyFlag fla
 
 #endif
 
+#if PLATFORM(MAC)
+// All tile grids of this process, so tile memory can be accounted against cc's per-renderer budget
+// (cc::TileManager enforces one GlobalStateThatImpactsTilePriority memory limit across a LayerTreeHostImpl).
+static HashSet<const TileGrid*>& liveTileGrids()
+{
+    ASSERT(isMainThread());
+    static NeverDestroyed<HashSet<const TileGrid*>> grids;
+    return grids.get();
+}
+
+static size_t totalTileMemoryInBytes()
+{
+    size_t bytes = 0;
+    for (auto* grid : liveTileGrids())
+        bytes += grid->tileMemoryInBytes();
+    return bytes;
+}
+#endif
+
+size_t TileGrid::tileMemoryInBytes() const
+{
+    // 4 bytes per pixel, tile sizes are in device pixels.
+    return m_tiles.size() * static_cast<size_t>(m_tileSize.width()) * static_cast<size_t>(m_tileSize.height()) * 4;
+}
+
 TileGrid::TileGrid(TileController& controller)
     : m_identifier(TileGridIdentifier::generate())
     , m_controller(controller)
@@ -70,12 +97,18 @@ TileGrid::TileGrid(TileController& controller)
 {
     m_containerLayer.get().setName(TileController::tileGridContainerLayerName());
     m_containerLayer.get().setContentsScale(controller.deviceScaleFactor());
+#if PLATFORM(MAC)
+    liveTileGrids().add(this);
+#endif
 }
 
 TileGrid::~TileGrid()
 {
     ASSERT_WITH_SECURITY_IMPLICATION(isMainThread());
 
+#if PLATFORM(MAC)
+    liveTileGrids().remove(this);
+#endif
     for (auto& tile : m_tiles.values())
         protect(tile.layer)->setOwner(nullptr);
 }
@@ -405,6 +438,15 @@ void TileGrid::revalidateTiles(OptionSet<ValidationPolicyFlag> validationPolicy)
 
     m_scaleAtLastRevalidation = m_scale;
 
+#if PLATFORM(MAC)
+    // cc keeps already rastered tiles anywhere in the EVENTUALLY (interest) rect and only evicts outside it, or
+    // when the renderer is over its tile memory budget (TileManager::AssignGpuMemoryToTiles evicts by priority).
+    FloatRect retainRect = m_controller->chromiumRetainRect();
+    retainRect.scale(m_scale);
+    IntRect retainRectInTileCoords = enclosingIntRect(retainRect);
+    bool canRetainTiles = !retainRectInTileCoords.isEmpty() && totalTileMemoryInBytes() <= TileController::chromiumTileMemoryBudget(m_controller->deviceScaleFactor());
+#endif
+
     // Move tiles newly outside the coverage rect into the cohort map.
     for (auto& entry : m_tiles) {
         TileInfo& tileInfo = entry.value;
@@ -412,6 +454,13 @@ void TileGrid::revalidateTiles(OptionSet<ValidationPolicyFlag> validationPolicy)
 
         RefPtr tileLayer = tileInfo.layer.get();
         IntRect tileRect = rectForTileIndex(tileIndex);
+
+#if PLATFORM(MAC)
+        // Outside the raster rect but inside the interest rect: keep the rastered contents. Invalidated tiles here
+        // are not re-rastered (cc only decodes their images), so those go.
+        if (!tileRect.intersects(coverageRectInTileCoords) && canRetainTiles && tileInfo.cohort == visibleTileCohort && !tileInfo.hasStaleContent && tileRect.intersects(retainRectInTileCoords))
+            continue;
+#endif
 
         if (tileRect.intersects(coverageRectInTileCoords)) {
             tileInfo.cohort = visibleTileCohort;

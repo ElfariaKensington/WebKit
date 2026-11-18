@@ -77,6 +77,8 @@
 #include "MarkStackMergingConstraint.h"
 #include "MarkedSpaceInlines.h"
 #include "MarkingConstraintSet.h"
+#include "MemoryStatistics.h"
+#include "JSLock.h"
 #include "MegamorphicCache.h"
 #include "ModuleLoadingContext.h"
 #include "ModuleProgramExecutable.h"
@@ -168,7 +170,7 @@ NODELETE static size_t maxEdenSizeForRateLimiting(GrowthMode growthMode, size_t 
 {
     // Only do rate limiting for Aggressive heaps.
     if (growthMode == GrowthMode::Aggressive)
-        return std::min(Options::maxEdenSizeForRateLimitingMultiplier(), 4.0) * minBytesPerCycle;
+        return Options::maxEdenSizeForRateLimitingMultiplier() * minBytesPerCycle;
     return 0.0;
 }
 
@@ -187,15 +189,9 @@ static size_t proportionalHeapSize(size_t heapSize, GrowthMode growthMode, size_
 #endif
 
     if (useNewHeapGrowthFactor) {
-        double maxIncrease = std::min(Options::heapGrowthMaxIncrease(), 1.50);
         double x = static_cast<double>(std::min(heapSize, ramSize)) / ramSize;
-        double ratio = maxIncrease * std::exp(-(Options::heapGrowthSteepnessFactor() * x)) + 1;
-#if USE(MEMORY_FOOTPRINT_API)
-        size_t memoryFootprint = WTF::memoryFootprint();
-        double footprintCap = memoryFootprint >= 768 * MB ? 1.24 : (memoryFootprint >= 384 * MB ? 1.40 : (maxIncrease + 1.0));
-        ratio = std::min(ratio, footprintCap);
-#endif
-        return static_cast<size_t>(ratio * heapSize);
+        double ratio = Options::heapGrowthMaxIncrease() * std::exp(-(Options::heapGrowthSteepnessFactor() * x)) + 1;
+        return ratio * heapSize;
     }
 
 #if USE(MEMORY_FOOTPRINT_API)
@@ -212,6 +208,210 @@ static size_t proportionalHeapSize(size_t heapSize, GrowthMode growthMode, size_
 #endif
     return Options::largeHeapGrowthFactor() * heapSize;
 }
+
+#if PLATFORM(MAC)
+// Heap limit policy ported from V8 (Copyright 2012-2025 the V8 project authors, BSD-3-Clause),
+// pinned at v8/v8@5688b11b27330c4c3148c8d0fa535b4110561622:
+//   src/heap/heap-controller.{h,cc}   MemoryController::ComputeSqrtLimit, V8HeapTrait::BoundAllocationLimit
+//   src/heap/heap.cc                  Heap::CurrentHeapGrowingMode, ShouldOptimizeForMemoryUsage,
+//                                     OldGenerationSizeFromPhysicalMemory, HasLowAllocationRate, HasHighFragmentation
+//   src/heap/gc-tracer.{h,cc}, src/heap/base/bytes.h   allocation throughput and GC speed estimators
+//   src/flags/flag-definitions.h      sqrt_allocation_limits (default true) and its factors
+// Mapping to JSC: V8's old generation is JSC's post-collection heap (old cells + extra memory); bytes that
+// survive an Eden collection are V8's promoted bytes; a Full collection is a mark-compact.
+namespace V8HeapPolicy {
+
+static constexpr double kMinGrowingFactor = 1.1; // sqrt_allocation_limits_min_growing_factor
+static constexpr double kMaxGrowingFactor = 4.0; // sqrt_allocation_limits_max_growing_factor
+static constexpr double kSqrtLimitFactor = 80; // sqrt_allocation_limits_factor
+static constexpr double kSqrtLimitSlowFactor = 80; // sqrt_allocation_limits_slow_factor
+static constexpr double kSqrtLimitMinimalFactor = 20; // sqrt_allocation_limits_minimal_factor
+static constexpr size_t kMinimumAllocationLimitGrowingStep = 8 * MB; // V8HeapTrait
+static constexpr size_t kDefaultMinHeapSize = 256 * MB; // Heap::kDefaultMinHeapSize
+static constexpr size_t kDefaultMaxHeapSize = 4 * GB; // Heap::kDefaultMaxHeapSize (64-bit)
+static constexpr double kSmoothedAllocationSpeedIncreaseDecayRateMs = 100; // GCTracer
+static constexpr double kSmoothedAllocationSpeedDeclineDecayRateMs = 1000; // GCTracer
+static constexpr double kMaxSpeedInBytesPerMs = GB; // BoundedThroughput / BoundedAverageSpeed
+static constexpr double kHighMutatorUtilization = 0.993; // Heap::HasLow*AllocationRate
+static constexpr double kConservativeGcSpeedInBytesPerMillisecond = 200000; // ComputeMutatorUtilizationImpl
+static constexpr size_t kHighFragmentationSlack = 16 * MB; // Heap::HasHighFragmentation
+static constexpr unsigned kRingBufferSize = 10; // v8::base::RingBuffer kSize
+static constexpr size_t kDefaultMaxSemiSpaceSize = 32 * MB; // Heap::DefaultMaxSemiSpaceSize (kScavengerDefaultMaxCapacity)
+static constexpr size_t kDefaultInitialOldGenerationSize = 512 * MB; // Heap::DefaultInitialOldGenerationSize (256 MB * HeapLimitMultiplier)
+
+enum class GrowingMode : uint8_t { Default, Slow, Conservative, Minimal }; // Heap::HeapGrowingMode
+
+// heap::base::SmoothedBytesAndDuration.
+struct SmoothedThroughput {
+    double throughput { 0 };
+    void update(double bytes, double durationMs)
+    {
+        if (durationMs <= 0)
+            return;
+        double newThroughput = bytes / durationMs;
+        double decay = newThroughput >= throughput ? kSmoothedAllocationSpeedIncreaseDecayRateMs : kSmoothedAllocationSpeedDeclineDecayRateMs;
+        throughput = newThroughput + (throughput - newThroughput) * std::exp2(-durationMs / decay);
+    }
+    double bounded() const { return std::min(throughput, kMaxSpeedInBytesPerMs); }
+};
+
+// v8::base::RingBuffer<BytesAndDuration> + heap::base::AverageSpeed (min 1 byte/ms, max 1 GB/ms).
+struct SpeedRingBuffer {
+    std::array<std::pair<double, double>, kRingBufferSize> entries { };
+    unsigned count { 0 };
+    unsigned next { 0 };
+    void push(double bytes, double durationMs)
+    {
+        entries[next] = { bytes, durationMs };
+        next = (next + 1) % kRingBufferSize;
+        count = std::min(count + 1, kRingBufferSize);
+    }
+    std::optional<double> averageSpeed() const
+    {
+        double bytes = 0;
+        double durationMs = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            bytes += entries[i].first;
+            durationMs += entries[i].second;
+        }
+        if (durationMs <= 0)
+            return std::nullopt;
+        return std::max(std::min(bytes / durationMs, kMaxSpeedInBytesPerMs), 1.0);
+    }
+};
+
+struct State {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(State);
+    MonotonicTime lastSampleTime;
+    size_t allocationCounterAtLastSample { 0 };
+    SmoothedThroughput oldGenerationAllocations;
+    SmoothedThroughput youngGenerationAllocations;
+    SpeedRingBuffer fullCollectionSpeed; // recorded_major_totals_
+    SpeedRingBuffer edenCollectionSpeed; // recorded_minor_gc_atomic_pause_
+    std::array<double, kRingBufferSize> survivalRatios { }; // recorded_survival_ratios_
+    unsigned survivalRatioCount { 0 };
+    unsigned nextSurvivalRatio { 0 };
+    unsigned fullCollectionCount { 0 };
+    bool reduceMemoryFootprintForNextFullCollection { false }; // GCFlag::kReduceMemoryFootprint
+    bool memoryReducerIsDone { false }; // MemoryReducer::ShouldGrowHeapSlowly
+    bool lastCollectionWasCritical { false };
+    bool usingInitialLimit { true }; // HeapLimits::using_initial_limit
+    size_t oldGenerationAllocationLimit { 0 }; // 0 until initialized from the RAM size.
+    size_t lastLiveSize { 0 };
+
+    double averageSurvivalRatio() const
+    {
+        if (!survivalRatioCount)
+            return 0;
+        double sum = 0;
+        for (unsigned i = 0; i < survivalRatioCount; ++i)
+            sum += survivalRatios[i];
+        return sum / survivalRatioCount;
+    }
+
+    void recordSurvivalRatio(double ratio)
+    {
+        survivalRatios[nextSurvivalRatio] = std::clamp(ratio, 0.0, 1.0);
+        nextSurvivalRatio = (nextSurvivalRatio + 1) % kRingBufferSize;
+        survivalRatioCount = std::min(survivalRatioCount + 1, kRingBufferSize);
+    }
+
+    // GCTracer::SampleAllocation.
+    void sampleAllocation(MonotonicTime now, size_t youngBytes, size_t oldBytes)
+    {
+        if (lastSampleTime) {
+            double durationMs = (now - lastSampleTime).milliseconds();
+            youngGenerationAllocations.update(youngBytes, durationMs);
+            oldGenerationAllocations.update(oldBytes, durationMs);
+        }
+        lastSampleTime = now;
+    }
+
+    // Heap::ComputeMutatorUtilization / HasLowAllocationRate. JSC has no embedder (cppgc) heap.
+    static bool hasHighMutatorUtilization(double mutatorSpeed, std::optional<double> gcSpeed)
+    {
+        double speed = gcSpeed.value_or(kConservativeGcSpeedInBytesPerMillisecond);
+        return speed / (mutatorSpeed + speed) > kHighMutatorUtilization;
+    }
+    bool hasLowAllocationRate() const
+    {
+        return hasHighMutatorUtilization(youngGenerationAllocations.bounded(), edenCollectionSpeed.averageSpeed())
+            && hasHighMutatorUtilization(oldGenerationAllocations.bounded(), fullCollectionSpeed.averageSpeed());
+    }
+};
+
+static Lock s_stateLock;
+static std::atomic<bool> s_isBackgrounded; // v8::Isolate::Priority::kBestEffort
+static std::atomic<bool> s_highMemoryPressure; // Heap::HighMemoryPressure
+static std::atomic<const Heap*> s_sampledHeap; // Heap whose allocations feed the young-generation counter.
+static std::atomic<size_t> s_sampledHeapAllocationCounter; // Heap::NewSpaceAllocationCounter
+
+static HashMap<const Heap*, UniqueRef<State>>& states() WTF_REQUIRES_LOCK(s_stateLock)
+{
+    static NeverDestroyed<HashMap<const Heap*, UniqueRef<State>>> map;
+    return map.get();
+}
+
+static State& stateFor(const Heap& heap) WTF_REQUIRES_LOCK(s_stateLock)
+{
+    return states().ensure(&heap, [] { return makeUniqueRef<State>(); }).iterator->value.get();
+}
+
+// Heap::OldGenerationSizeFromPhysicalMemory (64-bit: physical memory / 2, clamped to [256 MB, 4 GB]).
+static size_t maxOldGenerationSize(size_t ramSize)
+{
+    return std::clamp<size_t>(ramSize / 2, kDefaultMinHeapSize, kDefaultMaxHeapSize);
+}
+
+// Heap::DefaultInitialOldGenerationSize, capped at half the maximum (Heap::ConfigureHeap).
+static size_t initialOldGenerationSize(size_t ramSize)
+{
+    return std::min(kDefaultInitialOldGenerationSize, maxOldGenerationSize(ramSize) / 2);
+}
+
+// Heap::CurrentHeapGrowingMode.
+static GrowingMode currentGrowingMode(const State& state, size_t heapSize, size_t ramSize, bool isCritical)
+{
+    if (state.reduceMemoryFootprintForNextFullCollection)
+        return GrowingMode::Minimal;
+    // Heap::ShouldOptimizeForMemoryUsage: background isolate, high memory pressure, or no room to expand
+    // the old generation by an eighth of its maximum (CanExpandOldGeneration(max / 8)).
+    size_t maxSize = maxOldGenerationSize(ramSize);
+    if (s_isBackgrounded.load(std::memory_order_relaxed) || s_highMemoryPressure.load(std::memory_order_relaxed) || isCritical || heapSize + maxSize / 8 > maxSize)
+        return GrowingMode::Conservative;
+    if (state.memoryReducerIsDone)
+        return GrowingMode::Slow;
+    return GrowingMode::Default;
+}
+
+static double sqrtLimitFactor(GrowingMode mode)
+{
+    switch (mode) {
+    case GrowingMode::Conservative:
+    case GrowingMode::Minimal:
+        return kSqrtLimitMinimalFactor;
+    case GrowingMode::Slow:
+        return kSqrtLimitSlowFactor;
+    case GrowingMode::Default:
+        return kSqrtLimitFactor;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+// HeapLimits::UpdateAllocationLimits with sqrt_allocation_limits: ComputeSqrtLimit + V8HeapTrait::BoundAllocationLimit.
+// JSC's limit also covers Eden (V8's new space), so new_space_capacity is not added on top.
+static size_t allocationLimit(GrowingMode mode, size_t heapSizeAtLastGC, size_t sizeOfObjectsAtLastGC, double allocationSpeed, size_t minSize, size_t ramSize)
+{
+    double heapSize = std::max<double>(heapSizeAtLastGC, 1);
+    double computed = heapSize + sqrtLimitFactor(mode) * std::sqrt(allocationSpeed * sizeOfObjectsAtLastGC);
+    computed = std::clamp(computed, kMinGrowingFactor * heapSize, kMaxGrowingFactor * heapSize);
+    double limit = std::max(computed, heapSize + kMinimumAllocationLimitGrowingStep);
+    double halfwayToTheMax = (heapSize + maxOldGenerationSize(ramSize)) / 2;
+    return static_cast<size_t>(std::clamp(limit, static_cast<double>(minSize), std::max<double>(halfwayToTheMax, minSize)));
+}
+
+} // namespace V8HeapPolicy
+#endif // PLATFORM(MAC)
 
 static void recordType(TypeCountSet& set, JSCell* cell)
 {
@@ -414,6 +614,15 @@ Heap::~Heap()
 {
     // Scribble m_worldState to make it clear that the heap has already been destroyed if we crash in checkConn
     m_worldState.store(0xbadbeeffu);
+
+#if PLATFORM(MAC)
+    {
+        Locker locker { V8HeapPolicy::s_stateLock };
+        V8HeapPolicy::states().remove(this);
+        const Heap* expected = this;
+        V8HeapPolicy::s_sampledHeap.compare_exchange_strong(expected, nullptr);
+    }
+#endif
 
     m_mutatorMarkStack->clear();
 
@@ -641,11 +850,6 @@ bool Heap::overCriticalMemoryThreshold(MemoryThresholdCallType memoryThresholdCa
 #if USE(MEMORY_FOOTPRINT_API)
     if (memoryThresholdCallType == MemoryThresholdCallType::Direct || ++m_percentAvailableMemoryCachedCallCount >= 100) {
         m_overCriticalMemoryThreshold = WTF::percentAvailableMemoryInUse() > Options::criticalGCMemoryThreshold();
-#if !PLATFORM(IOS_FAMILY)
-        // Treat high per-process footprint as critical so heavy tabs shrink like V8 even on high-RAM Macs.
-        if (!m_overCriticalMemoryThreshold && WTF::memoryFootprint() >= 640 * MB)
-            m_overCriticalMemoryThreshold = true;
-#endif
         m_percentAvailableMemoryCachedCallCount = 0;
     }
 
@@ -655,6 +859,83 @@ bool Heap::overCriticalMemoryThreshold(MemoryThresholdCallType memoryThresholdCa
     return false;
 #endif
 }
+
+#if PLATFORM(MAC)
+void setHeapIsBackgrounded(bool isBackgrounded)
+{
+    V8HeapPolicy::s_isBackgrounded.store(isBackgrounded, std::memory_order_relaxed);
+}
+
+void setHeapHighMemoryPressure(bool highMemoryPressure)
+{
+    V8HeapPolicy::s_highMemoryPressure.store(highMemoryPressure, std::memory_order_relaxed);
+}
+
+HeapGrowingStatistics sampleHeapGrowingStatistics(VM& vm)
+{
+    JSLockHolder lock(vm);
+    JSC::Heap& heap = vm.heap;
+    HeapGrowingStatistics statistics;
+    statistics.sizeOfObjects = heap.size();
+    statistics.committedMemory = heap.capacity();
+    statistics.isCollecting = !!heap.collectionScope() || heap.isShuttingDown();
+    // Heap::HasHighFragmentation: committed > 2 * used + 16 MB.
+    statistics.hasHighFragmentation = statistics.committedMemory >= statistics.sizeOfObjects
+        && statistics.committedMemory - statistics.sizeOfObjects > statistics.sizeOfObjects + V8HeapPolicy::kHighFragmentationSlack;
+
+    const Heap* expected = nullptr;
+    V8HeapPolicy::s_sampledHeap.compare_exchange_strong(expected, &heap);
+
+    Locker locker { V8HeapPolicy::s_stateLock };
+    auto& state = V8HeapPolicy::stateFor(heap);
+    // GCTracer::SampleAllocation from MemoryReducer::TimerTask. JSC only moves bytes into the old generation at
+    // collections, so this interval contributes young-generation bytes only.
+    size_t youngBytes = 0;
+    if (V8HeapPolicy::s_sampledHeap.load(std::memory_order_relaxed) == &heap) {
+        size_t counter = V8HeapPolicy::s_sampledHeapAllocationCounter.load(std::memory_order_relaxed);
+        youngBytes = counter - state.allocationCounterAtLastSample;
+        state.allocationCounterAtLastSample = counter;
+    }
+    state.sampleAllocation(MonotonicTime::now(), youngBytes, 0);
+    statistics.fullCollectionCount = state.fullCollectionCount;
+    statistics.hasLowAllocationRate = state.hasLowAllocationRate();
+    size_t maxSize = V8HeapPolicy::maxOldGenerationSize(WTF::ramSize());
+    statistics.shouldOptimizeForMemoryUsage = V8HeapPolicy::s_isBackgrounded.load(std::memory_order_relaxed)
+        || V8HeapPolicy::s_highMemoryPressure.load(std::memory_order_relaxed)
+        || state.lastCollectionWasCritical
+        || state.lastLiveSize + maxSize / 8 > maxSize;
+    return statistics;
+}
+
+void startMemoryReducerCollection(VM& vm)
+{
+    JSLockHolder lock(vm);
+    {
+        Locker locker { V8HeapPolicy::s_stateLock };
+        V8HeapPolicy::stateFor(vm.heap).reduceMemoryFootprintForNextFullCollection = true;
+    }
+    vm.heap.collectAsync(CollectionScope::Full);
+}
+
+void notifyHeapContextDisposed(VM& vm)
+{
+    Locker locker { V8HeapPolicy::s_stateLock };
+    auto& state = V8HeapPolicy::stateFor(vm.heap);
+    // "The survival rate of the disposed context is not indicative of the survival rate of the next one."
+    // (tracer()->ResetSurvivalEvents())
+    state.survivalRatioCount = 0;
+    state.nextSurvivalRatio = 0;
+    // limits()->ResetAllocationLimit()
+    state.oldGenerationAllocationLimit = V8HeapPolicy::initialOldGenerationSize(WTF::ramSize());
+    state.usingInitialLimit = true;
+}
+
+void setHeapMemoryReducerIsDone(VM& vm, bool isDone)
+{
+    Locker locker { V8HeapPolicy::s_stateLock };
+    V8HeapPolicy::stateFor(vm.heap).memoryReducerIsDone = isDone;
+}
+#endif // PLATFORM(MAC)
 
 void Heap::reportAbandonedObjectGraph()
 {
@@ -1953,9 +2234,47 @@ void Heap::updateAllocationLimits()
         // the new allocation limit based on the current size of the heap, with a
         // fixed minimum.
         size_t lastMaxHeapSize = m_maxHeapSize;
-        m_maxHeapSize = std::max(m_minBytesPerCycle, proportionalHeapSize(currentHeapSize, m_growthMode, m_ramSize));
-        m_maxEdenSize = m_maxHeapSize - currentHeapSize;
-        if (m_isInOpportunisticTask && !isCritical && m_maxHeapSize < 256 * MB) {
+        bool allowOpportunisticEdenGrowth = true;
+#if PLATFORM(MAC)
+        if (!VM::isInMiniMode()) {
+            // V8 mark-compact epilogue: sample allocation, record GC speed, then HeapLimits::UpdateAllocationLimits.
+            auto now = MonotonicTime::now();
+            Locker locker { V8HeapPolicy::s_stateLock };
+            auto& state = V8HeapPolicy::stateFor(*this);
+            size_t allocatedThisCycle = totalBytesAllocatedThisCycle();
+            // Bytes from this cycle that reached the old generation; before any Eden collection has measured a
+            // survival rate, count all of them (overestimates the allocation speed, i.e. errs toward a larger limit).
+            double averageSurvivalRatio = state.survivalRatioCount ? state.averageSurvivalRatio() : 1.0;
+            size_t promotedBytes = static_cast<size_t>(allocatedThisCycle * averageSurvivalRatio);
+            size_t youngBytes = 0;
+            if (this == V8HeapPolicy::s_sampledHeap.load(std::memory_order_relaxed)) {
+                size_t counter = V8HeapPolicy::s_sampledHeapAllocationCounter.load(std::memory_order_relaxed);
+                youngBytes = counter - state.allocationCounterAtLastSample;
+                state.allocationCounterAtLastSample = counter;
+            }
+            state.sampleAllocation(now, youngBytes, promotedBytes);
+            state.fullCollectionSpeed.push(currentHeapSize, std::max((now - m_currentGCStartTime).milliseconds(), 0.001));
+            state.fullCollectionCount++;
+            state.lastCollectionWasCritical = isCritical;
+            state.lastLiveSize = currentHeapSize;
+
+            auto mode = V8HeapPolicy::currentGrowingMode(state, currentHeapSize, m_ramSize, isCritical);
+            state.reduceMemoryFootprintForNextFullCollection = false;
+            state.oldGenerationAllocationLimit = V8HeapPolicy::allocationLimit(mode, currentHeapSize, m_oldGenerationCellBytes, state.oldGenerationAllocations.bounded(), m_minBytesPerCycle, m_ramSize);
+            state.usingInitialLimit = false;
+            // V8's young generation is separate from the old-generation limit; JSC's Eden gets the same budget as
+            // V8's maximum semi-space (Heap::DefaultMaxSemiSpaceSize) on top of the live heap.
+            m_maxEdenSize = V8HeapPolicy::kDefaultMaxSemiSpaceSize;
+            m_maxHeapSize = currentHeapSize + m_maxEdenSize;
+            allowOpportunisticEdenGrowth = mode == V8HeapPolicy::GrowingMode::Default;
+            dataLogLnIf(Options::logGC(), "V8 heap limit: mode ", static_cast<unsigned>(mode), ", live ", currentHeapSize / KB, "kb, limit ", state.oldGenerationAllocationLimit / KB, "kb, old gen allocation speed ", state.oldGenerationAllocations.bounded(), " bytes/ms");
+        } else
+#endif
+        {
+            m_maxHeapSize = std::max(m_minBytesPerCycle, proportionalHeapSize(currentHeapSize, m_growthMode, m_ramSize));
+            m_maxEdenSize = m_maxHeapSize - currentHeapSize;
+        }
+        if (m_isInOpportunisticTask && !isCritical && allowOpportunisticEdenGrowth) {
             // After an Opportunistic Full GC, we allow eden to occupy all the space we recovered.
             // In this case, m_maxHeapSize may be larger than currentHeapSize + m_maxEdenSize.
             // Note that m_maxEdenSize is still used when we increase m_maxHeapSize after an
@@ -1976,10 +2295,43 @@ void Heap::updateAllocationLimits()
         dataLogLnIf(verbose, "Eden: remainingHeapSize = ", remainingHeapSize);
         m_sizeAfterLastEdenCollect = currentHeapSize;
         dataLogLnIf(verbose, "Eden: sizeAfterLastEdenCollect = ", currentHeapSize);
-        double edenToOldGenerationRatio = (double)remainingHeapSize / (double)m_maxHeapSize;
-        double minEdenToOldGenerationRatio = 1.0 / 3.0;
-        if (edenToOldGenerationRatio < minEdenToOldGenerationRatio)
-            m_shouldDoFullCollection = true;
+        bool useV8Limits = false;
+#if PLATFORM(MAC)
+        if (!VM::isInMiniMode()) {
+            // V8 scavenge epilogue: survivors are promoted into the old generation, and a mark-compact is due
+            // once the old generation reaches its allocation limit (Heap::OldGenerationSpaceAvailable() == 0).
+            useV8Limits = true;
+            auto now = MonotonicTime::now();
+            Locker locker { V8HeapPolicy::s_stateLock };
+            auto& state = V8HeapPolicy::stateFor(*this);
+            size_t promotedBytes = currentHeapSize - m_sizeAfterLastCollect;
+            if (m_bytesAllocatedBeforeLastEdenCollect)
+                state.recordSurvivalRatio(static_cast<double>(promotedBytes) / m_bytesAllocatedBeforeLastEdenCollect);
+            size_t youngBytes = 0;
+            if (this == V8HeapPolicy::s_sampledHeap.load(std::memory_order_relaxed)) {
+                size_t counter = V8HeapPolicy::s_sampledHeapAllocationCounter.load(std::memory_order_relaxed);
+                youngBytes = counter - state.allocationCounterAtLastSample;
+                state.allocationCounterAtLastSample = counter;
+            }
+            state.sampleAllocation(now, youngBytes, promotedBytes);
+            state.edenCollectionSpeed.push(m_bytesAllocatedBeforeLastEdenCollect, std::max((now - m_currentGCStartTime).milliseconds(), 0.001));
+            if (!state.oldGenerationAllocationLimit)
+                state.oldGenerationAllocationLimit = V8HeapPolicy::initialOldGenerationSize(m_ramSize);
+            if (state.usingInitialLimit) {
+                // HeapLimits::ShrinkAllocationLimitIfNotConfigured.
+                size_t shrunk = std::max<size_t>(currentHeapSize + V8HeapPolicy::kMinimumAllocationLimitGrowingStep, state.oldGenerationAllocationLimit * state.averageSurvivalRatio());
+                state.oldGenerationAllocationLimit = std::min(shrunk, state.oldGenerationAllocationLimit);
+            }
+            if (currentHeapSize >= state.oldGenerationAllocationLimit)
+                m_shouldDoFullCollection = true;
+        }
+#endif
+        if (!useV8Limits) {
+            double edenToOldGenerationRatio = (double)remainingHeapSize / (double)m_maxHeapSize;
+            double minEdenToOldGenerationRatio = 1.0 / 3.0;
+            if (edenToOldGenerationRatio < minEdenToOldGenerationRatio)
+                m_shouldDoFullCollection = true;
+        }
         m_maxHeapSize = std::max(m_maxHeapSize, currentHeapSize + m_maxEdenSize);
         dataLogLnIf(verbose, "Eden: maxHeapSize = ", m_maxHeapSize);
         dataLogLnIf(verbose, "Eden: maxEdenSize = ", m_maxEdenSize);
@@ -2075,6 +2427,10 @@ void Heap::didAllocate(size_t bytes)
         m_lastOversizedAllocationThisCycle = bytes;
     } else
         m_nonOversizedBytesAllocatedThisCycle += bytes;
+#if PLATFORM(MAC)
+    if (this == V8HeapPolicy::s_sampledHeap.load(std::memory_order_relaxed))
+        V8HeapPolicy::s_sampledHeapAllocationCounter.fetch_add(bytes, std::memory_order_relaxed);
+#endif
 
     // totalBytesAllocatedThisCycle() depends on values updated above.
     // So, only do this m_edenActivityCallback after updating those values.

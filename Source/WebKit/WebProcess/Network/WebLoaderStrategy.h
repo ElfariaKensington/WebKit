@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "ChromiumResourceScheduler.h"
 #include "NetworkResourceLoadIdentifier.h"
 #include "WebResourceLoader.h"
 #include <WebCore/LoaderStrategy.h>
@@ -148,6 +149,11 @@ private:
     bool shouldPerformSecurityChecks() const final;
     bool havePerformedSecurityChecks(const WebCore::ResourceResponse&) const final;
     bool hasExistingNetworkLoadToResume() const final { return !!m_existingNetworkResourceLoadIdentifierToResume; }
+#if PLATFORM(MAC)
+public:
+    ChromiumResourceScheduler& chromiumResourceScheduler() { return m_chromiumResourceScheduler; }
+private:
+#endif
 
     void isResourceLoadFinished(WebCore::CachedResource&, CompletionHandler<void(bool)>&&) final;
 
@@ -170,6 +176,9 @@ private:
     HashMap<WebCore::ResourceLoaderIdentifier, PreconnectCompletionHandler> m_preconnectCompletionHandlers;
     Vector<Function<void(bool)>> m_onlineStateChangeListeners;
     std::optional<NetworkResourceLoadIdentifier> m_existingNetworkResourceLoadIdentifierToResume;
+#if PLATFORM(MAC)
+    ChromiumResourceScheduler m_chromiumResourceScheduler;
+#endif
     bool m_isOnLine { true };
 };
 

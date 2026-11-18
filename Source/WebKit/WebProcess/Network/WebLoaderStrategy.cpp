@@ -302,6 +302,21 @@ void WebLoaderStrategy::scheduleLoad(ResourceLoader& resourceLoader, CachedResou
     }
 
     WEBLOADERSTRATEGY_RELEASE_LOG_FORWARDABLE(WebLoaderStrategyScheduleLoad);
+#if PLATFORM(MAC)
+    // Blink's renderer ResourceLoadScheduler and the network service's ResourceScheduler decide when a subresource
+    // is handed to the network process.
+    auto start = [weakThis = WeakPtr { *this }, protectedResourceLoader = Ref { resourceLoader }, trackingParameters = *trackingParameters, shouldClearReferrerOnHTTPSToHTTPRedirect, bufferingTime = maximumBufferingTime(resource)] {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis)
+            return;
+        auto& resourceLoader = protectedResourceLoader.get();
+        auto request = resourceLoader.request();
+        request.setPriority(std::max(request.priority(), protectedThis->m_chromiumResourceScheduler.scheduledPriority(resourceLoader)));
+        protectedThis->scheduleLoadFromNetworkProcess(resourceLoader, request, trackingParameters, shouldClearReferrerOnHTTPSToHTTPRedirect, bufferingTime);
+    };
+    if (!m_chromiumResourceScheduler.schedule(resourceLoader, resource, WTF::move(start)))
+        return;
+#endif
     scheduleLoadFromNetworkProcess(resourceLoader, resourceLoader.request(), *trackingParameters, shouldClearReferrerOnHTTPSToHTTPRedirect, maximumBufferingTime(resource));
 }
 
@@ -720,6 +735,9 @@ void WebLoaderStrategy::remove(ResourceLoader* resourceLoader)
         LOG_ERROR("WebLoaderStrategy removing a ResourceLoader that has no identifier.");
         return;
     }
+#if PLATFORM(MAC)
+    m_chromiumResourceScheduler.remove(*resourceLoader);
+#endif
 
     if (RefPtr task = m_urlSchemeTasks.take(*identifier).get()) {
         ASSERT(!m_internallyFailedResourceLoaders.contains(resourceLoader));
@@ -1206,12 +1224,22 @@ bool WebLoaderStrategy::havePerformedSecurityChecks(const ResourceResponse& resp
 
 void WebLoaderStrategy::setResourceLoadSchedulingMode(WebCore::Page& page, WebCore::LoadSchedulingMode mode)
 {
+#if PLATFORM(MAC)
+    // Scheduling is done by ChromiumResourceScheduler; keep the network process's own per-origin throttling off.
+    mode = WebCore::LoadSchedulingMode::Direct;
+#endif
     auto& connection = WebProcess::singleton().ensureNetworkProcessConnection().connection();
     connection.send(Messages::NetworkConnectionToWebProcess::SetResourceLoadSchedulingMode(WebPage::fromCorePage(page)->identifier(), mode), 0);
 }
 
 void WebLoaderStrategy::prioritizeResourceLoads(const Vector<Ref<WebCore::SubresourceLoader>>& resources)
 {
+#if PLATFORM(MAC)
+    // Page::prioritizeVisibleResources reports resources visible in the viewport after layout; Blink raises those
+    // to kHigh (ResourceFetcher::UpdateAllImageResourcePriorities -> ComputeLoadPriority with kVisible).
+    for (auto& loader : resources)
+        m_chromiumResourceScheduler.boostToVisiblePriority(loader.get());
+#endif
     auto identifiers = resources.map([](auto& loader) {
         return *loader->identifier();
     });

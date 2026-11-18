@@ -62,6 +62,7 @@ public:
     ~TileGrid();
 
     TileGridIdentifier identifier() const { return m_identifier; }
+    size_t tileMemoryInBytes() const;
 
 #if USE(CA)
     PlatformCALayer& containerLayer() { return m_containerLayer; }

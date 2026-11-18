@@ -29,6 +29,54 @@ namespace WebCore {
 
 ResourceLoadPriority DefaultResourceLoadPriority::forResourceType(CachedResource::Type type)
 {
+#if PLATFORM(MAC)
+    // Blink's TypeToPriority (third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc,
+    // chromium/chromium@25cdf5d33309850b64974c2f9fc617fe925746e7; Copyright The Chromium Authors, BSD-3-Clause).
+    switch (type) {
+    case CachedResource::Type::MainResource:
+        return ResourceLoadPriority::VeryHigh;
+    case CachedResource::Type::CSSStyleSheet:
+    case CachedResource::Type::FontResource:
+    case CachedResource::Type::SVGFontResource:
+        // "Also parser-blocking scripts (set explicitly in loadPriority)"
+        return ResourceLoadPriority::VeryHigh;
+#if ENABLE(XSLT)
+    case CachedResource::Type::XSLStyleSheet:
+#endif
+    case CachedResource::Type::RawResource:
+    case CachedResource::Type::Script:
+    case CachedResource::Type::JSON:
+    case CachedResource::Type::Text:
+        // "Also visible resources/images (set explicitly in loadPriority)"
+        return ResourceLoadPriority::High;
+#if ENABLE(APPLICATION_MANIFEST)
+    case CachedResource::Type::ApplicationManifest:
+        return ResourceLoadPriority::Medium;
+#endif
+#if ENABLE(MODEL_ELEMENT)
+    case CachedResource::Type::EnvironmentMapResource:
+    case CachedResource::Type::ModelResource:
+        return ResourceLoadPriority::Medium;
+#endif
+    case CachedResource::Type::ImageResource:
+    case CachedResource::Type::Icon:
+    case CachedResource::Type::MediaResource:
+    case CachedResource::Type::SVGDocumentResource:
+#if ENABLE(VIDEO)
+    case CachedResource::Type::TextTrackResource:
+#endif
+        // "Also async scripts (set explicitly in loadPriority)"
+        return ResourceLoadPriority::Low;
+    case CachedResource::Type::LinkPrefetch:
+        return ResourceLoadPriority::VeryLow;
+    case CachedResource::Type::Beacon:
+    case CachedResource::Type::Ping:
+        // ComputeLoadPriority: BEACON, PING and CSP_REPORT request contexts.
+        return ResourceLoadPriority::VeryLow;
+    }
+    ASSERT_NOT_REACHED();
+    return ResourceLoadPriority::Low;
+#else
     switch (type) {
     case CachedResource::Type::MainResource:
         return ResourceLoadPriority::VeryHigh;
@@ -72,6 +120,7 @@ ResourceLoadPriority DefaultResourceLoadPriority::forResourceType(CachedResource
     }
     ASSERT_NOT_REACHED();
     return ResourceLoadPriority::Low;
+#endif
 }
 
 }

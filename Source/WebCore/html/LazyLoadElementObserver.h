@@ -54,9 +54,14 @@ public:
     static void unobserveIfLazyLoadOnly(Element&, Document&);
 
 private:
-    IntersectionObserver* intersectionObserver(Document&);
+    enum class Kind : uint8_t { Other, Image, Frame };
+    static Kind kindForElement(const Element&);
+    IntersectionObserver* intersectionObserver(Document&, Kind = Kind::Other);
 
     const RefPtr<IntersectionObserver> m_observer;
+    // Blink observes lazy images and lazy frames with their own distance thresholds.
+    const RefPtr<IntersectionObserver> m_imageObserver;
+    const RefPtr<IntersectionObserver> m_frameObserver;
 };
 
 } // namespace WebCore

@@ -420,6 +420,12 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
     } else if (capacityOverride >= 0) {
         m_capacity = capacityOverride;
     } else {
+#if PLATFORM(MAC)
+        // Chromium never keeps a renderer whose last frame went away (RenderProcessHostImpl exits it once its
+        // keep-alive count reaches zero); only one unused spare renderer exists, which is WebKit's prewarmed process.
+        m_capacity = 0;
+        WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache is disabled (Chromium renderer lifetime)", 0);
+#else
         unsigned maxProcesses = 32;
 #if PLATFORM(IOS_FAMILY)
         if (!processPool.hasUsedSiteIsolation())
@@ -437,6 +443,7 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
             m_capacity = std::min<unsigned>(memorySize / (256 * MB), maxProcesses);
             WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache has a capacity of %u processes", 0, capacity());
         }
+#endif
     }
 
     if (!m_capacity)

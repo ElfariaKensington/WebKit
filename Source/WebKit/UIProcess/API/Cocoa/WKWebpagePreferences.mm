@@ -916,6 +916,19 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
     _websitePolicies->setForceDisableAXCustomColorMode(disabled);
 }
 
+#else
+
+// The header declares this SPI unconditionally and system Safari calls it; without these
+// stubs open-source builds throw "unrecognized selector" and Safari aborts.
+- (BOOL)_forceDisableAXCustomColorMode
+{
+    return NO;
+}
+
+- (void)_setForceDisableAXCustomColorMode:(BOOL)disabled
+{
+}
+
 #endif
 
 @end

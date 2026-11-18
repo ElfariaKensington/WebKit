@@ -64,7 +64,12 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CachedPage);
 
 CachedPage::CachedPage(Page& page)
     : m_page(page)
+#if PLATFORM(MAC)
+    // Capped below Chromium's 600 s time-to-live at the user's request.
+    , m_expirationTime(MonotonicTime::now() + std::min(page.settings().backForwardCacheExpirationInterval(), 300_s))
+#else
     , m_expirationTime(MonotonicTime::now() + page.settings().backForwardCacheExpirationInterval())
+#endif
     , m_cachedMainFrame(makeUnique<CachedFrame>(protect(page.mainFrame())))
     , m_loadedSubresourceDomains([&] {
         RefPtr localFrame = page.localMainFrame();

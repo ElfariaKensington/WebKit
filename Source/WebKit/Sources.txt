@@ -664,6 +664,7 @@ UIProcess/WebsiteData/WebsiteDataStoreConfiguration.cpp
 
 UIProcess/XR/PlatformXRSystem.cpp
 
+WebProcess/ChromiumMemoryPolicy.cpp
 WebProcess/WebProcess.cpp @cost:11
 WebProcess/WebSleepDisablerClient.cpp
 WebProcess/WebSystemSoundDelegate.cpp
@@ -843,6 +844,7 @@ WebProcess/GPU/webrtc/SampleBufferDisplayLayer.cpp
 WebProcess/GPU/webrtc/SampleBufferDisplayLayerManager.cpp
 
 WebProcess/Network/NetworkProcessConnection.cpp @cost:4
+WebProcess/Network/ChromiumResourceScheduler.cpp
 WebProcess/Network/WebLoaderStrategy.cpp @cost:4
 WebProcess/Network/WebResourceInterceptController.cpp
 WebProcess/Network/WebResourceLoader.cpp

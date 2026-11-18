@@ -809,7 +809,7 @@ void WebProcess::updateProcessName(IsInProcessInitialization isInProcessInitiali
         break;
     }
 
-#if ENABLE(SET_WEBCONTENT_PROCESS_INFORMATION_IN_NETWORK_PROCESS)
+#if ENABLE(SET_WEBCONTENT_PROCESS_INFORMATION_IN_NETWORK_PROCESS) && USE(APPLE_INTERNAL_SDK)
     // During WebProcess initialization, we are still able to talk to LaunchServices to set the process name so there is no need to go
     // via the NetworkProcess. Prewarmed WebProcesses also do not have a network process connection until they are actually used by
     // a page, and the print process never has one.
@@ -1090,15 +1090,19 @@ void WebProcess::getProcessDisplayName(CompletionHandler<void(String&&)>&& compl
 void WebProcess::updateActivePages(const String& overrideDisplayName)
 {
 #if PLATFORM(MAC)
-#if ENABLE(SET_WEBCONTENT_PROCESS_INFORMATION_IN_NETWORK_PROCESS)
+#if ENABLE(SET_WEBCONTENT_PROCESS_INFORMATION_IN_NETWORK_PROCESS) && USE(APPLE_INTERNAL_SDK)
     auto auditToken = auditTokenForSelf();
     if (!auditToken)
         return;
     protect(ensureNetworkProcessConnection())->connection().send(Messages::NetworkConnectionToWebProcess::UpdateActivePages(overrideDisplayName, activePagesOrigins(m_pageMap), *auditToken), 0);
 #else
     if (!overrideDisplayName) {
-        RunLoop::mainSingleton().dispatch([activeOrigins = activePagesOrigins(m_pageMap)] {
+        RunLoop::mainSingleton().dispatch([activeOrigins = activePagesOrigins(m_pageMap), uiProcessName = m_uiProcessName, isWebContent = (m_processType == ProcessType::WebContent)] {
             _LSSetApplicationInformationItem(kLSDefaultSessionID, RetainPtr { _LSGetCurrentApplicationASN() }.get(), CFSTR("LSActivePageUserVisibleOriginsKey"), (__bridge CFArrayRef)createNSArray(activeOrigins).get(), nullptr);
+            if (isWebContent && !activeOrigins.isEmpty()) {
+                RetainPtr displayName = adoptNS([[NSString alloc] initWithFormat:@"%@ Web Content (%@)", uiProcessName.createNSString().get(), activeOrigins.first().createNSString().get()]);
+                _LSSetApplicationInformationItem(kLSDefaultSessionID, RetainPtr { _LSGetCurrentApplicationASN() }.get(), _kLSDisplayNameKey, (CFStringRef)displayName.get(), nullptr);
+            }
         });
     } else {
         RunLoop::mainSingleton().dispatch([name = overrideDisplayName.createCFString()] {

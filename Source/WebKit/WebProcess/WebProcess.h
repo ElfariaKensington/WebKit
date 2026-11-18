@@ -170,6 +170,10 @@ class WebGeolocationManager;
 class WebLoaderStrategy;
 class WebNotificationManager;
 class WebPage;
+#if PLATFORM(MAC)
+class BlinkMemoryPurgeManager;
+class V8MemoryReducer;
+#endif
 class UserMediaCaptureManager;
 class WebPageGroupProxy;
 class WebProcessSupplement;
@@ -359,6 +363,12 @@ public:
 
     void pageDidEnterWindow(WebCore::PageIdentifier);
     void pageWillLeaveWindow(WebCore::PageIdentifier);
+#if PLATFORM(MAC)
+    // Chromium renderer memory policies (ChromiumMemoryPolicy.h).
+    void updateRendererBackgrounded();
+    void mainFrameContextWillBeDisposed();
+    void ensureChromiumMemoryPolicy();
+#endif
 
     void nonVisibleProcessEarlyMemoryCleanupTimerFired();
 
@@ -931,6 +941,9 @@ private:
     bool m_loggedProcessLimitCriticalMemoryStatistics { false };
     bool m_wasVisibleSinceLastProcessSuspensionEvent { false };
 #if PLATFORM(MAC)
+    RefPtr<V8MemoryReducer> m_v8MemoryReducer;
+    std::unique_ptr<BlinkMemoryPurgeManager> m_memoryPurgeManager;
+    bool m_rendererIsBackgrounded { false };
     const std::unique_ptr<WebCore::CPUMonitor> m_cpuMonitor;
     std::optional<double> m_cpuLimit;
 

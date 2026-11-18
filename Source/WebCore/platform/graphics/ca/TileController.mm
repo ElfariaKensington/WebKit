@@ -32,6 +32,7 @@
 #include "IntRect.h"
 #include "Logging.h"
 #include "PlatformCALayer.h"
+#include "PlatformScreen.h"
 #include "Region.h"
 #include "TileCoverageMap.h"
 #include "TileGrid.h"
@@ -39,6 +40,7 @@
 #include <utility>
 #include <wtf/MainThread.h>
 #include <wtf/MemoryPressureHandler.h>
+#include <wtf/RAMSize.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/TextStream.h>
@@ -437,10 +439,21 @@ IntRect TileController::boundsAtLastRevalidateWithoutMargin() const
 
 FloatRect TileController::adjustTileCoverageRect(const FloatRect& coverageRect, const FloatRect& previousVisibleRect, const FloatRect& currentVisibleRect, bool sizeChanged)
 {
+#if PLATFORM(MAC)
+    UNUSED_PARAM(previousVisibleRect);
+    UNUSED_PARAM(sizeChanged);
+    if (!m_isInWindow) {
+        m_chromiumVisibleRectHistory.clear();
+        m_chromiumRetainRect = { };
+        return currentVisibleRect;
+    }
+    return computeChromiumTileCoverage(coverageRect, FloatSize(bounds().size()), currentVisibleRect, tileGrid().scale());
+#else
     if (sizeChanged || MemoryPressureHandler::singleton().isUnderMemoryPressure())
         return unionRect(coverageRect, currentVisibleRect);
 
     return GraphicsLayer::adjustCoverageRectForMovement(coverageRect, previousVisibleRect, currentVisibleRect);
+#endif
 }
 
 #if !PLATFORM(IOS_FAMILY)
@@ -456,14 +469,14 @@ FloatRect TileController::adjustTileCoverageForDesktopPageScrolling(const FloatR
     // Inflate the coverage rect so that it covers 2x of the visible width and 3x of the visible height.
     // These values were chosen because it's more common to have tall pages and to scroll vertically,
     // so we keep more tiles above and below the current area.
-    float widthScale = 1.25;
-    float heightScale = 1.5;
+    float widthScale = 1;
+    float heightScale = 1;
 
     if (m_tileCoverage & CoverageForHorizontalScrolling && !largeVisibleRectChange)
         widthScale = 2;
 
     if (m_tileCoverage & CoverageForVerticalScrolling && !largeVisibleRectChange)
-        heightScale = 3.5;
+        heightScale = 3;
 
     coverageSize.scale(widthScale, heightScale);
 
@@ -556,8 +569,19 @@ FloatRect TileController::adjustTileCoverageWithScrollingVelocity(const FloatRec
 FloatRect TileController::adjustTileCoverageRectForScrolling(const FloatRect& coverageRect, const FloatSize& newSize, const FloatRect& previousVisibleRect, const FloatRect& visibleRect, float contentsScale)
 {
     // If the page is not in a window (for example if it's in a background tab), we limit the tile coverage rect to the visible rect.
-    if (!m_isInWindow)
+    if (!m_isInWindow) {
+#if PLATFORM(MAC)
+        // cc::LayerTreeHostImpl::SetVisible(false): a hidden compositor keeps no prepainted tiles.
+        m_chromiumVisibleRectHistory.clear();
+        m_chromiumRetainRect = { };
+#endif
         return visibleRect;
+    }
+
+#if PLATFORM(MAC)
+    UNUSED_PARAM(previousVisibleRect);
+    return computeChromiumTileCoverage(coverageRect, newSize, visibleRect, contentsScale);
+#else
 
 #if !PLATFORM(IOS_FAMILY)
     if (m_tileCacheLayer.get()->isPageTiledBackingLayer())
@@ -581,7 +605,113 @@ FloatRect TileController::adjustTileCoverageRectForScrolling(const FloatRect& co
     computeVelocityIfNecessary(visibleRect.location());
 
     return adjustTileCoverageWithScrollingVelocity(coverageRect, newSize, visibleRect, contentsScale, currentTime);
+#endif
 }
+
+#if PLATFORM(MAC)
+// Tile prioritization ported from Chromium's compositor (Copyright The Chromium Authors, BSD-3-Clause),
+// chromium/chromium@25cdf5d33309850b64974c2f9fc617fe925746e7:
+//   cc/tiles/picture_layer_tiling_set.cc  UpdatePriorityRects, ComputeSkewport, kMaxSoonBorderDistanceInScreenPixels
+//   cc/tiles/picture_layer_tiling.cc      ComputePrioritizedTile (process_for_images_only: raster distance gate)
+//   cc/trees/layer_tree_settings.h        skewport_target_time_in_seconds, skewport_extrapolation_limit_in_screen_pixels,
+//                                         max_preraster_distance_in_screen_pixels
+//   cc/base/features.h                    kDefaultInterestAreaSizeInPixels
+//   third_party/blink/renderer/platform/widget/compositing/layer_tree_settings.cc  GetGpuMemoryPolicy (Mac)
+// cc's screen pixels are device pixels; WebKit layer coordinates are converted with the contents scale.
+static constexpr float chromiumInterestAreaSizeInScreenPixels = 3000; // tiling_interest_area_padding
+static constexpr float chromiumSkewportExtrapolationLimitInScreenPixels = 2000;
+// cc uses 1 s for software raster and 0.2 s for GPU raster; WebKit tiles are rasterized with CoreGraphics.
+static constexpr double chromiumSkewportTargetTimeInSeconds = 1.0;
+static constexpr float chromiumMaxSoonBorderDistanceInScreenPixels = 312; // also min_preraster_distance
+static constexpr float chromiumMaxPrerasterDistanceInScreenPixels = 1000;
+
+FloatRect TileController::computeChromiumTileCoverage(const FloatRect& coverageRect, const FloatSize& newSize, const FloatRect& visibleRect, float contentsScale)
+{
+    MonotonicTime now = MonotonicTime::now();
+    FloatRect layerBounds = boundsForSize(newSize);
+    FloatRect visible = intersection(visibleRect, layerBounds);
+    if (visible.isEmpty() || contentsScale <= 0) {
+        // "If we have no visible rect, clear all interest rects."
+        m_chromiumVisibleRectHistory.clear();
+        m_chromiumRetainRect = { };
+        return visibleRect;
+    }
+
+    float screenToLayer = 1 / contentsScale;
+
+    // EVENTUALLY rect: the visible rect padded by the interest area.
+    FloatRect eventually = visible;
+    eventually.inflate(chromiumInterestAreaSizeInScreenPixels * screenToLayer);
+
+    // PictureLayerTilingSet::ComputeSkewport: extrapolate the movement since the oldest recorded frame over the
+    // skewport target time, capped at the extrapolation limit.
+    FloatRect skewport = visible;
+    if (!m_chromiumVisibleRectHistory.isEmpty()) {
+        auto& historicalFrame = m_chromiumVisibleRectHistory.first();
+        double timeDelta = (now - historicalFrame.frameTime).seconds();
+        if (timeDelta > 0) {
+            double extrapolationMultiplier = chromiumSkewportTargetTimeInSeconds / timeDelta;
+            const FloatRect& old = historicalFrame.visibleRect;
+            float insetX = (visible.x() - old.x()) * extrapolationMultiplier;
+            float insetY = (visible.y() - old.y()) * extrapolationMultiplier;
+            float insetRight = (old.maxX() - visible.maxX()) * extrapolationMultiplier;
+            float insetBottom = (old.maxY() - visible.maxY()) * extrapolationMultiplier;
+
+            FloatRect maxSkewport = visible;
+            maxSkewport.inflate(chromiumSkewportExtrapolationLimitInScreenPixels * screenToLayer);
+
+            float left = visible.x() + insetX;
+            float top = visible.y() + insetY;
+            float right = std::max(left, visible.maxX() - insetRight);
+            float bottom = std::max(top, visible.maxY() - insetBottom);
+            skewport = unionRect(FloatRect(left, top, right - left, bottom - top), visible);
+            skewport.intersect(maxSkewport);
+            skewport = unionRect(skewport, visible);
+            skewport.intersect(eventually);
+        }
+    }
+
+    // Visible rect history: the original visible rect of the last two frames.
+    if (m_chromiumVisibleRectHistory.size() == 2)
+        m_chromiumVisibleRectHistory.removeAt(0);
+    m_chromiumVisibleRectHistory.append({ visible, now });
+
+    // "We use the largest skewport extent from the viewport as the skewport extent."
+    float maxSkewportExtentInScreenSpace = contentsScale * std::max({ visible.x() - skewport.x(), skewport.maxX() - visible.maxX(), visible.y() - skewport.y(), skewport.maxY() - visible.maxY() });
+
+    // PictureLayerTiling::ComputePrioritizedTile: a tile is rasterized (rather than only having its images
+    // decoded) if it is within min_preraster_distance of the viewport, or within both max_preraster_distance and
+    // half of the skewport extent.
+    float rasterDistanceInScreenSpace = std::max(chromiumMaxSoonBorderDistanceInScreenPixels, std::min(chromiumMaxPrerasterDistanceInScreenPixels, 0.5f * maxSkewportExtentInScreenSpace));
+    FloatRect rasterRect = visible;
+    rasterRect.inflate(rasterDistanceInScreenSpace * screenToLayer);
+    rasterRect.intersect(eventually);
+    rasterRect.intersect(layerBounds);
+
+    m_chromiumRetainRect = intersection(eventually, layerBounds);
+
+    LOG_WITH_STREAM(Tiling, stream << "TileController " << this << " computeChromiumTileCoverage visible " << visible << " skewport " << skewport << " raster distance " << rasterDistanceInScreenSpace << " coverage " << rasterRect << " retain " << m_chromiumRetainRect);
+    return unionRect(coverageRect, rasterRect);
+}
+
+size_t TileController::chromiumTileMemoryBudget(float deviceScaleFactor)
+{
+    // GetGpuMemoryPolicy: 1152 MB at 2056x1329 @2x, scaled with the display's pixel count, at least 512 MB and at
+    // most a quarter of physical memory. max_memory_for_prepaint_percentage is 100 on desktop.
+    static constexpr size_t largeResolutionMemoryMB = 1152;
+    static constexpr size_t defaultMemoryMB = 512;
+    static constexpr double largeResolution = 2056.0 * 1329 * 2 * 2;
+    FloatRect screen = screenRectForPrimaryScreen();
+    double displaySize = std::round(screen.width() * deviceScaleFactor * screen.height() * deviceScaleFactor);
+    size_t megabytes = static_cast<size_t>(largeResolutionMemoryMB * (displaySize / largeResolution));
+    size_t memoryCapMB = static_cast<size_t>(ramSize() / MB / 4);
+    if (megabytes > memoryCapMB)
+        megabytes = memoryCapMB;
+    else if (megabytes < defaultMemoryMB)
+        megabytes = defaultMemoryMB;
+    return megabytes * MB;
+}
+#endif // PLATFORM(MAC)
 
 void TileController::scheduleTileRevalidation(Seconds interval)
 {

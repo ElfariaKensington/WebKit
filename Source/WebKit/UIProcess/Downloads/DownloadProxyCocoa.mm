@@ -101,4 +101,57 @@ Vector<uint8_t> DownloadProxy::activityAccessToken()
 
 #endif
 
+#if PLATFORM(MAC)
+bool DownloadProxy::shouldUseFallbackDownloadsFolder()
+{
+    static bool isSafariForWebKitDevelopment = [[[NSProcessInfo processInfo] processName] isEqualToString:@"SafariForWebKitDevelopment"];
+    return isSafariForWebKitDevelopment;
+}
+
+String DownloadProxy::fallbackDownloadDestinationPath(const String& suggestedFilename)
+{
+    RetainPtr<NSFileManager> fileManager = [NSFileManager defaultManager];
+    RetainPtr<NSURL> downloadsURL = [[fileManager URLsForDirectory:NSDownloadsDirectory inDomains:NSUserDomainMask] firstObject];
+    if (!downloadsURL)
+        return { };
+
+    RetainPtr<NSString> sanitizedName = [suggestedFilename.createNSString().get() lastPathComponent];
+    if (![sanitizedName length] || [sanitizedName isEqualToString:@"."] || [sanitizedName isEqualToString:@".."])
+        sanitizedName = @"download";
+
+    RetainPtr<NSURL> candidateURL = [downloadsURL URLByAppendingPathComponent:sanitizedName.get()];
+    if ([fileManager fileExistsAtPath:[candidateURL path]]) {
+        RetainPtr<NSString> baseName = [sanitizedName stringByDeletingPathExtension];
+        RetainPtr<NSString> extension = [sanitizedName pathExtension];
+        if (![baseName length])
+            baseName = @"download";
+        for (unsigned suffix = 1; suffix < 10000; ++suffix) {
+            RetainPtr<NSString> numberedName = [extension length]
+                ? [NSString stringWithFormat:@"%@-%u.%@", baseName.get(), suffix, extension.get()]
+                : [NSString stringWithFormat:@"%@-%u", baseName.get(), suffix];
+            candidateURL = [downloadsURL URLByAppendingPathComponent:numberedName.get()];
+            if (![fileManager fileExistsAtPath:[candidateURL path]])
+                break;
+        }
+        if ([fileManager fileExistsAtPath:[candidateURL path]])
+            return { };
+    }
+
+    return [candidateURL path];
+}
+
+std::optional<String> DownloadProxy::fallbackDestinationIfNeeded()
+{
+    if (!shouldUseFallbackDownloadsFolder())
+        return std::nullopt;
+
+    auto destination = fallbackDownloadDestinationPath(m_pendingFallbackSuggestedFilename);
+    if (destination.isEmpty())
+        return std::nullopt;
+
+    m_usingFallbackDownloadsFolder = true;
+    return destination;
+}
+#endif
+
 }
