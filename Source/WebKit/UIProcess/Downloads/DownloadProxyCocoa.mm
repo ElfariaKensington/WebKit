@@ -31,6 +31,7 @@
 #import "NetworkProcessProxy.h"
 #import "WebsiteDataStore.h"
 
+#import <objc/runtime.h>
 #import <wtf/cocoa/SpanCocoa.h>
 #import <wtf/cocoa/VectorCocoa.h>
 
@@ -104,6 +105,8 @@ Vector<uint8_t> DownloadProxy::activityAccessToken()
 #if PLATFORM(MAC)
 bool DownloadProxy::shouldUseFallbackDownloadsFolder()
 {
+    if (objc_getClass("SDSLocalDownloadLocationController"))
+        return false;
     static bool isSafariForWebKitDevelopment = [[[NSProcessInfo processInfo] processName] isEqualToString:@"SafariForWebKitDevelopment"];
     return isSafariForWebKitDevelopment;
 }

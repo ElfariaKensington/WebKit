@@ -14,6 +14,8 @@
 #import <mach-o/dyld.h>
 
 bool SDSInstallInProcessSandboxBroker(void); // InProcessSandboxBroker.m
+void SDSInstallLiveExtensionSync(void); // LiveExtensionSync.m
+bool SDSInstallMagicExtensionIconCache(void); // MagicExtensionIconCache.m
 
 static void noopStartListening(id self, SEL _cmd) { }
 
@@ -40,10 +42,11 @@ static void imageAdded(const struct mach_header* header, intptr_t slide)
     (void)header; (void)slide;
     tryInstall();
     static bool brokerInstalled;
-    // Experimental and still crashes Safari when a download starts: opt in with
-    // SAFARIDEVSHIMS_BROKER=1 until the bundle completion arguments are fixed.
-    if (!brokerInstalled && getenv("SAFARIDEVSHIMS_BROKER"))
+    if (!brokerInstalled && !getenv("SAFARIDEVSHIMS_NO_BROKER"))
         brokerInstalled = SDSInstallInProcessSandboxBroker();
+    static bool iconCacheInstalled;
+    if (!iconCacheInstalled)
+        iconCacheInstalled = SDSInstallMagicExtensionIconCache();
 }
 
 __attribute__((constructor))
@@ -54,5 +57,8 @@ static void installNoBestAppSuggestionShim(void)
     _dyld_register_func_for_add_image(imageAdded);
     // An image's add callback can run before the ObjC runtime registers its classes;
     // retry once the main queue runs.
-    dispatch_async(dispatch_get_main_queue(), ^{ imageAdded(NULL, 0); });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        imageAdded(NULL, 0);
+        SDSInstallLiveExtensionSync();
+    });
 }

@@ -111,6 +111,138 @@ static id localSandboxBroker(void)
     return broker;
 }
 
+static id localRestrictedSandboxBroker(void);
+
+// Wraps RestrictedSandboxBroker so operations that fail in an unsandboxed process solely
+// because SafariSandboxBroker tries to issue cross-process sandbox tokens or strip
+// QTN_HARD (both EPERM without the private broker XPC entitlement) still finish cleanly
+// using standard NSFileManager calls in the user's Downloads folder.
+@interface SDSLocalBrokerProxy : NSObject
+@property (nonatomic, strong) id target;
+@end
+
+@implementation SDSLocalBrokerProxy
+
+- (void)moveDownloadedFilesAtURLs:(NSArray<NSURL*>*)fileURLs fromDownloadBundleAtURL:(NSURL*)bundleURL completionHandler:(void (^)(BOOL, NSArray<NSURL*>*, NSArray<NSData*>*, NSError*))completion
+{
+    id target = self.target;
+    void (^wrapped)(BOOL, NSArray<NSURL*>*, NSArray<NSData*>*, NSError*) = ^(BOOL ok, NSArray<NSURL*>* movedURLs, NSArray<NSData*>* extensions, NSError* error) {
+        if (ok && movedURLs.count) {
+            if (completion)
+                completion(ok, movedURLs, extensions, error);
+            return;
+        }
+        NSFileManager* fm = [NSFileManager defaultManager];
+        NSURL* parentDir = [bundleURL URLByDeletingLastPathComponent];
+        if (!parentDir || !fileURLs.count) {
+            if (completion)
+                completion(ok, movedURLs, extensions, error);
+            return;
+        }
+        NSMutableArray<NSURL*>* moved = [NSMutableArray arrayWithCapacity:fileURLs.count];
+        NSMutableArray<NSData*>* dummyExts = [NSMutableArray arrayWithCapacity:fileURLs.count];
+        NSError* moveErr = nil;
+        for (NSURL* srcURL in fileURLs) {
+            if (![fm fileExistsAtPath:srcURL.path])
+                continue;
+            NSString* name = srcURL.lastPathComponent ?: @"download";
+            NSURL* dstURL = [parentDir URLByAppendingPathComponent:name];
+            if ([fm fileExistsAtPath:dstURL.path]) {
+                NSString* base = [name stringByDeletingPathExtension];
+                NSString* ext = [name pathExtension];
+                for (unsigned idx = 1; idx < 10000; ++idx) {
+                    NSString* candidate = ext.length
+                        ? [NSString stringWithFormat:@"%@-%u.%@", base, idx, ext]
+                        : [NSString stringWithFormat:@"%@-%u", base, idx];
+                    dstURL = [parentDir URLByAppendingPathComponent:candidate];
+                    if (![fm fileExistsAtPath:dstURL.path])
+                        break;
+                }
+            }
+            if (![fm moveItemAtURL:srcURL toURL:dstURL error:&moveErr]) {
+                os_log_error(shimLog(), "fallback moveItemAtURL failed: %{public}@", moveErr);
+                if (completion)
+                    completion(NO, nil, nil, moveErr);
+                return;
+            }
+            [moved addObject:dstURL];
+            [dummyExts addObject:[NSData data]];
+        }
+        if (bundleURL && [bundleURL.pathExtension isEqualToString:@"download"])
+            [fm removeItemAtURL:bundleURL error:nil];
+        os_log(shimLog(), "moved %lu downloaded file(s) out of %{public}@", (unsigned long)moved.count, bundleURL.lastPathComponent);
+        if (completion)
+            completion(moved.count > 0, moved, dummyExts, nil);
+    };
+    ((void (*)(id, SEL, id, id, id))objc_msgSend)(target, _cmd, fileURLs, bundleURL, wrapped);
+}
+
+- (void)writeFileWrapperToUniqueFileInDownloadsFolder:(NSFileWrapper*)fileWrapper shouldSetPrivacySensitiveQuarantineProperties:(BOOL)privacySensitive completionHandler:(void (^)(NSURL*, NSData*, NSError*))completion
+{
+    id target = self.target;
+    void (^wrapped)(NSURL*, NSData*, NSError*) = ^(NSURL* url, NSData* ext, NSError* error) {
+        if (url && !error) {
+            if (completion)
+                completion(url, ext, nil);
+            return;
+        }
+        NSFileManager* fm = [NSFileManager defaultManager];
+        NSURL* dlDir = [fm URLsForDirectory:NSDownloadsDirectory inDomains:NSUserDomainMask].firstObject;
+        if (!dlDir || !fileWrapper) {
+            if (completion)
+                completion(url, ext, error);
+            return;
+        }
+        NSString* name = fileWrapper.preferredFilename ?: fileWrapper.filename ?: @"download";
+        name = name.lastPathComponent.length ? name.lastPathComponent : @"download";
+        NSURL* dstURL = [dlDir URLByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:dstURL.path]) {
+            NSString* base = [name stringByDeletingPathExtension];
+            NSString* pathExt = [name pathExtension];
+            for (unsigned idx = 1; idx < 10000; ++idx) {
+                NSString* candidate = pathExt.length
+                    ? [NSString stringWithFormat:@"%@-%u.%@", base, idx, pathExt]
+                    : [NSString stringWithFormat:@"%@-%u", base, idx];
+                dstURL = [dlDir URLByAppendingPathComponent:candidate];
+                if (![fm fileExistsAtPath:dstURL.path])
+                    break;
+            }
+        }
+        NSError* writeErr = nil;
+        if (![fileWrapper writeToURL:dstURL options:NSFileWrapperWritingAtomic originalContentsURL:nil error:&writeErr]) {
+            os_log_error(shimLog(), "fallback writeFileWrapper failed: %{public}@", writeErr);
+            if (completion)
+                completion(nil, nil, writeErr);
+            return;
+        }
+        if (completion)
+            completion(dstURL, [NSData data], nil);
+    };
+    ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(target, _cmd, fileWrapper, privacySensitive, wrapped);
+}
+
+- (BOOL)respondsToSelector:(SEL)aSelector
+{
+    return [super respondsToSelector:aSelector] || [self.target respondsToSelector:aSelector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)aSelector
+{
+    return self.target;
+}
+
+- (NSMethodSignature*)methodSignatureForSelector:(SEL)aSelector
+{
+    return [self.target methodSignatureForSelector:aSelector] ?: [super methodSignatureForSelector:aSelector];
+}
+
+- (void)forwardInvocation:(NSInvocation*)invocation
+{
+    [invocation invokeWithTarget:self.target];
+}
+
+@end
+
 static id localRestrictedSandboxBroker(void)
 {
     static id restricted;
@@ -118,17 +250,23 @@ static id localRestrictedSandboxBroker(void)
     dispatch_once(&once, ^{
         id broker = localSandboxBroker();
         Class restrictedClass = objc_getClass("RestrictedSandboxBroker");
+        id inner = nil;
         if (broker && restrictedClass)
-            restricted = ((id (*)(id, SEL, id))objc_msgSend)([restrictedClass alloc], sel_registerName("initWithSandboxBroker:"), broker);
-        if (!restricted)
-            restricted = broker;
+            inner = ((id (*)(id, SEL, id))objc_msgSend)([restrictedClass alloc], sel_registerName("initWithSandboxBroker:"), broker);
+        if (!inner)
+            inner = broker;
+        if (inner) {
+            SDSLocalBrokerProxy* proxy = [SDSLocalBrokerProxy new];
+            proxy.target = inner;
+            restricted = proxy;
+        }
     });
     return restricted;
 }
 
 #pragma mark - Stand-in for DownloadLocationRemoteViewController
 
-typedef void (^DownloadBundleCompletion)(NSURL* bundleURL, NSData* sandboxExtension, NSString* filename, NSError* error);
+typedef void (^DownloadLocationBundleCompletion)(NSURL* bundleURL, NSString* filename, NSError* error);
 
 static NSURL* downloadFolderURL(id broker)
 {
@@ -141,9 +279,14 @@ static bool brokerAlwaysPrompts(id broker)
     return ((BOOL (*)(id, SEL))objc_msgSend)(broker, sel_registerName("alwaysPromptForDownloadFolder"));
 }
 
-static void createBundle(id broker, NSString* filename, NSURL* folder, bool allowsOverwrite, DownloadBundleCompletion completion)
+static void createBundle(id broker, NSString* filename, NSURL* folder, bool allowsOverwrite, DownloadLocationBundleCompletion completion)
 {
-    ((void (*)(id, SEL, id, id, id, BOOL, id))objc_msgSend)(broker, sel_registerName("createDownloadBundleWithSuggestedFilename:inFolderAtURL:tagNames:allowsOverwrite:completionHandler:"), filename, folder, @[], allowsOverwrite, completion);
+    void (^brokerCompletion)(NSURL*, NSData*, NSString*, NSError*) = ^(NSURL* bundleURL, NSData* sandboxExtension, NSString* resolvedFilename, NSError* error) {
+        (void)sandboxExtension;
+        if (completion)
+            completion(bundleURL, resolvedFilename, error);
+    };
+    ((void (*)(id, SEL, id, id, id, BOOL, id))objc_msgSend)(broker, sel_registerName("createDownloadBundleWithSuggestedFilename:inFolderAtURL:tagNames:allowsOverwrite:completionHandler:"), filename, folder, @[], allowsOverwrite, brokerCompletion);
 }
 
 // Implements the DownloadLocationService protocol, which the real
@@ -156,7 +299,7 @@ static void createBundle(id broker, NSString* filename, NSURL* folder, bool allo
 
 @implementation SDSLocalDownloadLocationController
 
-- (void)createDownloadBundleWithSuggestedFilename:(NSString*)suggestedFilename downloadLocationRequestType:(NSInteger)requestType completionHandler:(DownloadBundleCompletion)completion
+- (void)createDownloadBundleWithSuggestedFilename:(NSString*)suggestedFilename downloadLocationRequestType:(NSInteger)requestType completionHandler:(DownloadLocationBundleCompletion)completion
 {
     id broker = localSandboxBroker();
     os_log(shimLog(), "createDownloadBundle: requestType=%ld alwaysPrompt=%d", (long)requestType, brokerAlwaysPrompts(broker));
@@ -170,7 +313,8 @@ static void createBundle(id broker, NSString* filename, NSURL* folder, bool allo
         panel.nameFieldStringValue = suggestedFilename ?: @"";
         panel.directoryURL = downloadFolderURL(broker);
         if ([panel runModal] != NSModalResponseOK) {
-            completion(nil, nil, nil, [NSError errorWithDomain:NSCocoaErrorDomain code:NSUserCancelledError userInfo:nil]);
+            if (completion)
+                completion(nil, nil, [NSError errorWithDomain:NSCocoaErrorDomain code:NSUserCancelledError userInfo:nil]);
             return;
         }
         createBundle(broker, panel.URL.lastPathComponent, panel.URL.URLByDeletingLastPathComponent, true, completion);
@@ -208,6 +352,11 @@ static void createBundle(id broker, NSString* filename, NSURL* folder, bool allo
     os_log_error(shimLog(), "Save As is not supported in SafariForWebKitDevelopment");
     if (completion)
         completion([NSError errorWithDomain:NSCocoaErrorDomain code:NSFeatureUnsupportedError userInfo:nil]);
+}
+
+- (NSView*)view
+{
+    return nil;
 }
 
 - (NSMethodSignature*)methodSignatureForSelector:(SEL)selector
